@@ -154,12 +154,15 @@ install_dependencies() {
         iftop \
         nethogs
 
-    # Install iptables-persistent without interactive prompts
-    log_info "Installing iptables-persistent..."
-    echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
-    echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
-    apt-get install -y -qq iptables-persistent
+    # Force non-interactive mode for iptables-persistent
+    log_info "Preconfiguring iptables-persistent..."
+    echo 'iptables-persistent iptables-persistent/autosave_v4 boolean true' | debconf-set-selections
+    echo 'iptables-persistent iptables-persistent/autosave_v6 boolean true' | debconf-set-selections
     
+    log_info "Installing required packages (this may take a moment)..."
+    apt-get install -y -qq \
+        python3 python3-pip python3-venv wget curl net-tools sudo ufw jq sqlite3 fail2ban htop iftop nethogs iptables-persistent < /dev/null
+
     show_success_banner "All system dependencies installed"
     echo
 }
