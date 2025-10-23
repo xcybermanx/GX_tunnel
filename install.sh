@@ -481,6 +481,11 @@ show_main_menu() {
         esac
     done
 }
+echo "Installing Python packages..."
+pip3 install --upgrade pip
+pip3 install flask flask-cors psutil
+
+echo "Installation complete!"
 
 # User management menu
 show_user_management_menu() {
