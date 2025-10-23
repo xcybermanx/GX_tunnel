@@ -129,11 +129,12 @@ clean_previous_installation() {
     echo
 }
 
-# Install system dependencies
+# Install system dependencies without interactive prompts
 install_dependencies() {
     show_progress_banner "3" "Installing System Dependencies"
     
     log_info "Updating package list..."
+    export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     
     log_info "Installing required packages..."
@@ -149,10 +150,15 @@ install_dependencies() {
         jq \
         sqlite3 \
         fail2ban \
-        iptables-persistent \
         htop \
         iftop \
         nethogs
+
+    # Install iptables-persistent without interactive prompts
+    log_info "Installing iptables-persistent..."
+    echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+    echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+    apt-get install -y -qq iptables-persistent
     
     show_success_banner "All system dependencies installed"
     echo
@@ -200,13 +206,23 @@ download_files() {
     local base_url="https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main"
     
     log_info "Downloading main tunnel script..."
-    wget -q "$base_url/gx_websocket.py" -O "$INSTALL_DIR/gx_websocket.py"
+    if ! wget -q "$base_url/gx_websocket.py" -O "$INSTALL_DIR/gx_websocket.py"; then
+        log_error "Failed to download gx_websocket.py"
+        return 1
+    fi
     
     log_info "Downloading web GUI script..."
-    wget -q "$base_url/webgui.py" -O "$INSTALL_DIR/webgui.py"
+    if ! wget -q "$base_url/webgui.py" -O "$INSTALL_DIR/webgui.py"; then
+        log_error "Failed to download webgui.py"
+        return 1
+    fi
     
     log_info "Downloading management script..."
-    wget -q "$base_url/gx-tunnel.sh" -O /usr/local/bin/gx-tunnel
+    if ! wget -q "$base_url/gx-tunnel.sh" -O /usr/local/bin/gx-tunnel; then
+        log_error "Failed to download management script"
+        return 1
+    fi
+    
     chmod +x /usr/local/bin/gx-tunnel
     
     log_info "Creating users database..."
@@ -376,7 +392,7 @@ After=network.target
 Type=oneshot
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/usr/local/bin/gx-tunnel auto-update
+ExecStart=/usr/local/bin/gx-tunnel update
 StandardOutput=append:$LOG_DIR/update.log
 StandardError=append:$LOG_DIR/update.log
 
@@ -440,7 +456,7 @@ EOF
     echo
 }
 
-# Setup firewall with DDoS protection
+# Setup firewall with DDoS protection (non-interactive)
 setup_firewall() {
     show_progress_banner "8" "Configuring Firewall & DDoS Protection"
     
@@ -458,14 +474,16 @@ setup_firewall() {
     ufw limit 22/tcp comment 'SSH Rate Limit' > /dev/null 2>&1
     ufw limit 8081/tcp comment 'Web GUI Rate Limit' > /dev/null 2>&1
     
-    log_info "Setting up DDoS protection rules..."
-    # Basic DDoS protection with iptables
+    log_info "Setting up basic DDoS protection..."
+    # Basic rate limiting with iptables (non-interactive)
     iptables -N GX_DDOS 2>/dev/null || true
     iptables -F GX_DDOS
     
-    # Rate limiting rules
+    # Rate limiting rules for tunnel port
     iptables -A GX_DDOS -p tcp --dport 8080 -m limit --limit 60/minute --limit-burst 100 -j ACCEPT
     iptables -A GX_DDOS -p tcp --dport 8080 -j DROP
+    
+    # Rate limiting rules for web GUI port
     iptables -A GX_DDOS -p tcp --dport 8081 -m limit --limit 30/minute --limit-burst 50 -j ACCEPT
     iptables -A GX_DDOS -p tcp --dport 8081 -j DROP
     
@@ -473,8 +491,10 @@ setup_firewall() {
     iptables -D INPUT -p tcp -m multiport --dports 8080,8081 -j GX_DDOS 2>/dev/null || true
     iptables -A INPUT -p tcp -m multiport --dports 8080,8081 -j GX_DDOS
     
-    # Save iptables rules
-    iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    # Save iptables rules non-interactively
+    log_info "Saving iptables rules..."
+    mkdir -p /etc/iptables
+    iptables-save > /etc/iptables/rules.v4
     
     show_success_banner "Firewall and DDoS protection configured"
     echo
@@ -491,24 +511,6 @@ enabled = true
 port = ssh
 filter = sshd
 logpath = /var/log/auth.log
-maxretry = 3
-bantime = 3600
-findtime = 600
-
-[gx-tunnel]
-enabled = true
-port = 8080,8081
-filter = gx-tunnel
-logpath = $LOG_DIR/websocket.log
-maxretry = 5
-bantime = 7200
-findtime = 300
-
-[gx-webgui]
-enabled = true
-port = 8081
-filter = gx-webgui
-logpath = $LOG_DIR/webgui.log
 maxretry = 3
 bantime = 3600
 findtime = 600
