@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# GX Tunnel Management Script
+# GX Tunnel Installation Script
 # Created by Jawad - Telegram: @jawadx
 
 # Constants
@@ -9,7 +9,8 @@ GX_WEBGUI_SERVICE="gx-webgui"
 INSTALL_DIR="/opt/gx_tunnel"
 PYTHON_SCRIPT_PATH="$INSTALL_DIR/gx_websocket.py"
 WEBGUI_SCRIPT_PATH="$INSTALL_DIR/webgui.py"
-LOG_FILE="/var/log/gx_tunnel/websocket.log"
+LOG_DIR="/var/log/gx_tunnel"
+LOG_FILE="$LOG_DIR/websocket.log"
 USER_DB="$INSTALL_DIR/users.json"
 STATS_DB="$INSTALL_DIR/statistics.db"
 
@@ -55,530 +56,387 @@ check_root() {
     fi
 }
 
-# Function to get server IP
-get_server_ip() {
-    local ipv4=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
-    if [ -n "$ipv4" ]; then
-        echo "$ipv4"
+# Function to clean previous installation
+clean_previous_installation() {
+    echo -e "${YELLOW}[INFO] Cleaning previous installation...${NC}"
+    
+    # Stop and disable services
+    systemctl stop "$GX_TUNNEL_SERVICE" 2>/dev/null
+    systemctl stop "$GX_WEBGUI_SERVICE" 2>/dev/null
+    systemctl disable "$GX_TUNNEL_SERVICE" 2>/dev/null
+    systemctl disable "$GX_WEBGUI_SERVICE" 2>/dev/null
+    
+    # Remove systemd services
+    rm -f /etc/systemd/system/"$GX_TUNNEL_SERVICE".service
+    rm -f /etc/systemd/system/"$GX_WEBGUI_SERVICE".service
+    
+    # Remove installation directory
+    rm -rf "$INSTALL_DIR"
+    
+    # Remove log directory
+    rm -rf "$LOG_DIR"
+    
+    # Remove binary
+    rm -f /usr/local/bin/gx-tunnel
+    
+    systemctl daemon-reload
+    echo -e "${GREEN}[SUCCESS] Previous installation cleaned${NC}"
+}
+
+# Function to install system dependencies
+install_system_dependencies() {
+    echo -e "${YELLOW}[INFO] Installing system dependencies...${NC}"
+    
+    # Update package list
+    apt-get update -qq
+    
+    # Install system packages
+    apt-get install -y -qq \
+        python3 \
+        python3-pip \
+        python3-venv \
+        wget \
+        curl \
+        net-tools \
+        sudo \
+        ufw \
+        jq \
+        sqlite3 \
+        fail2ban
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}[SUCCESS] System dependencies installed${NC}"
     else
-        echo "unknown"
+        echo -e "${RED}[ERROR] Failed to install system dependencies${NC}"
+        exit 1
     fi
 }
 
-# Function to load user database
-load_user_db() {
-    if [ -f "$USER_DB" ]; then
-        cat "$USER_DB"
+# Function to install Python packages
+install_python_packages() {
+    echo -e "${YELLOW}[INFO] Installing Python packages...${NC}"
+    
+    # Upgrade pip first
+    pip3 install --upgrade pip
+    
+    # Install required Python packages
+    pip3 install flask flask-cors psutil
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${GREEN}[SUCCESS] Python packages installed successfully${NC}"
     else
-        echo '{"users": [], "settings": {}}'
+        echo -e "${RED}[ERROR] Failed to install Python packages${NC}"
+        exit 1
     fi
 }
 
-# Function to save user database
-save_user_db() {
-    local data="$1"
-    echo "$data" > "$USER_DB"
-    chmod 600 "$USER_DB"
+# Function to create application structure
+create_application_structure() {
+    echo -e "${YELLOW}[INFO] Creating application structure...${NC}"
+    
+    # Create installation directory
+    mkdir -p "$INSTALL_DIR"
+    
+    # Create log directory
+    mkdir -p "$LOG_DIR"
+    
+    # Create necessary files
+    touch "$LOG_FILE"
+    
+    # Set proper permissions
+    chmod 755 "$INSTALL_DIR"
+    chmod 644 "$LOG_FILE"
+    
+    echo -e "${GREEN}[SUCCESS] Application structure created${NC}"
 }
 
-# Function to add user with proper error handling
-add_tunnel_user() {
-    echo -e "${WHITE}👤 CREATE SSH TUNNEL USER${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+# Function to download application files
+download_application_files() {
+    echo -e "${YELLOW}[INFO] Downloading application files...${NC}"
     
-    read -p "Enter username: " username
+    # Base URL for raw GitHub content
+    local base_url="https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main"
     
-    # Validate username
-    if [[ ! "$username" =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-        echo -e "${RED}❌ Username can only contain lowercase letters, numbers, hyphens, and underscores${NC}"
+    # Download main tunnel script
+    if ! wget -q "$base_url/gx_websocket.py" -O "$PYTHON_SCRIPT_PATH"; then
+        echo -e "${RED}[ERROR] Failed to download gx_websocket.py${NC}"
         return 1
     fi
     
-    read -p "Enter password: " -s password
-    echo
-    echo
-
-    if [ -z "$username" ] || [ -z "$password" ]; then
-        echo -e "${RED}❌ Username or password cannot be empty${NC}"
+    # Download web GUI script
+    if ! wget -q "$base_url/webgui.py" -O "$WEBGUI_SCRIPT_PATH"; then
+        echo -e "${RED}[ERROR] Failed to download webgui.py${NC}"
         return 1
     fi
-
-    # Check if user exists in database
-    local user_db=$(load_user_db)
-    local user_exists=$(echo "$user_db" | jq -r ".users[] | select(.username == \"$username\") | .username")
     
-    if [ -n "$user_exists" ]; then
-        echo -e "${RED}❌ User $username already exists${NC}"
+    # Download management script to /usr/local/bin
+    if ! wget -q "$base_url/gx-tunnel.sh" -O /usr/local/bin/gx-tunnel; then
+        echo -e "${RED}[ERROR] Failed to download management script${NC}"
         return 1
     fi
+    
+    chmod +x /usr/local/bin/gx-tunnel
+    
+    # Create initial users database
+    cat > "$USER_DB" << EOF
+{
+    "users": [],
+    "settings": {
+        "tunnel_port": 8080,
+        "webgui_port": 8081,
+        "admin_password": "admin123"
+    }
+}
+EOF
 
-    # Ask for expiration date
-    echo -e "${YELLOW}Set account expiration (leave empty for no expiration):${NC}"
-    read -p "Enter expiration date (YYYY-MM-DD): " expiry_date
-
-    # Validate date format if provided
-    if [ -n "$expiry_date" ]; then
-        if ! date -d "$expiry_date" >/dev/null 2>&1; then
-            echo -e "${RED}❌ Invalid date format. Use YYYY-MM-DD${NC}"
-            return 1
-        fi
-    fi
-
-    # Ask for maximum connections
-    read -p "Enter maximum simultaneous connections (default: 3): " max_connections
-    max_connections=${max_connections:-3}
-
-    # Create system user with nologin shell
-    if useradd -m -s /usr/sbin/nologin "$username" 2>/dev/null; then
-        if echo "$username:$password" | chpasswd 2>/dev/null; then
-            # Add to user database
-            local new_user=$(jq -n \
-                --arg username "$username" \
-                --arg password "$password" \
-                --arg created "$(date +%Y-%m-%d)" \
-                --arg expires "$expiry_date" \
-                --argjson max_conn "$max_connections" \
-                '{username: $username, password: $password, created: $created, expires: $expires, max_connections: $max_conn, active: true}')
-            
-            local updated_db=$(echo "$user_db" | jq ".users += [$new_user]")
-            save_user_db "$updated_db"
-            
-            echo -e "${GREEN}✅ User $username created successfully${NC}"
-            show_user_config "$username" "$password" "$expiry_date" "$max_connections"
-        else
-            userdel -r "$username" 2>/dev/null
-            echo -e "${RED}❌ Failed to set password${NC}"
-        fi
-    else
-        echo -e "${RED}❌ Failed to create user${NC}"
-    fi
+    echo -e "${GREEN}[SUCCESS] Application files downloaded${NC}"
+    return 0
 }
 
-# Function to show user configuration
-show_user_config() {
-    local username="$1"
-    local password="$2"
-    local expiry_date="$3"
-    local max_connections="$4"
-    local server_ip=$(get_server_ip)
+# Function to create systemd services
+create_systemd_services() {
+    echo -e "${YELLOW}[INFO] Creating systemd services...${NC}"
     
-    echo
-    echo -e "${WHITE}🔧 USER CONFIGURATION${NC}"
-    echo -e "${CYAN}┌───────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│ ${GREEN}📋 Connection Details:${NC}                               ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${WHITE}Server: ${YELLOW}$server_ip${NC}                                       ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${WHITE}Port: ${YELLOW}8080${NC}                                           ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${WHITE}Username: ${YELLOW}$username${NC}                                     ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${WHITE}Password: ${YELLOW}$password${NC}                                     ${CYAN}│${NC}"
-    if [ -n "$expiry_date" ]; then
-        echo -e "${CYAN}│ ${WHITE}Expires: ${YELLOW}$expiry_date${NC}                                   ${CYAN}│${NC}"
-    else
-        echo -e "${CYAN}│ ${WHITE}Expires: ${GREEN}Never${NC}                                       ${CYAN}│${NC}"
-    fi
-    echo -e "${CYAN}│ ${WHITE}Max Connections: ${YELLOW}$max_connections${NC}                            ${CYAN}│${NC}"
-    echo -e "${CYAN}└───────────────────────────────────────────────────────────┘${NC}"
-    echo
-    echo -e "${WHITE}📱 Required Headers:${NC}"
-    echo -e "${CYAN}┌───────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│ ${YELLOW}X-Username: $username${NC}                                   ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${YELLOW}X-Password: $password${NC}                                   ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${YELLOW}X-Real-Host: target.com:22${NC}                              ${CYAN}│${NC}"
-    echo -e "${CYAN}└───────────────────────────────────────────────────────────┘${NC}"
-    echo
-    echo -e "${WHITE}🌐 Web GUI:${NC}"
-    echo -e "${CYAN}┌───────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${CYAN}│ ${GREEN}http://$server_ip:8081${NC}                                  ${CYAN}│${NC}"
-    echo -e "${CYAN}│ ${YELLOW}Admin Password: admin123${NC}                                ${CYAN}│${NC}"
-    echo -e "${CYAN}└───────────────────────────────────────────────────────────┘${NC}"
+    # Create tunnel service
+    cat > /etc/systemd/system/"$GX_TUNNEL_SERVICE".service << EOF
+[Unit]
+Description=GX Tunnel WebSocket Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/usr/bin/python3 $PYTHON_SCRIPT_PATH
+Restart=always
+RestartSec=3
+StandardOutput=file:$LOG_FILE
+StandardError=file:$LOG_FILE
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Create web GUI service
+    cat > /etc/systemd/system/"$GX_WEBGUI_SERVICE".service << EOF
+[Unit]
+Description=GX Tunnel Web GUI
+After=network.target
+Wants=$GX_TUNNEL_SERVICE.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/usr/bin/python3 $WEBGUI_SCRIPT_PATH
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Reload systemd and enable services
+    systemctl daemon-reload
+    systemctl enable "$GX_TUNNEL_SERVICE"
+    systemctl enable "$GX_WEBGUI_SERVICE"
+    
+    echo -e "${GREEN}[SUCCESS] Systemd services created${NC}"
 }
 
-# Function to delete user
-delete_tunnel_user() {
-    echo -e "${WHITE}🗑️  DELETE SSH TUNNEL USER${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+# Function to setup firewall
+setup_firewall() {
+    echo -e "${YELLOW}[INFO] Setting up firewall...${NC}"
     
-    local user_db=$(load_user_db)
-    local users=$(echo "$user_db" | jq -r '.users[] | "\(.username) (\(.created))"')
-    
-    if [ -z "$users" ]; then
-        echo -e "${YELLOW}⚠️  No users found${NC}"
-        return
+    # Enable UFW if not enabled
+    if ! ufw status | grep -q "Status: active"; then
+        echo "y" | ufw enable
     fi
     
-    echo -e "${YELLOW}Available users:${NC}"
-    echo "$users" | nl -w 2 -s ') '
-    echo
+    # Allow SSH
+    ufw allow 22/tcp comment 'SSH'
     
-    read -p "Enter username to delete: " username
+    # Allow tunnel port
+    ufw allow 8080/tcp comment 'GX Tunnel'
     
-    if [ -z "$username" ]; then
-        echo -e "${RED}❌ Username cannot be empty${NC}"
-        return
-    fi
-
-    # Check if user exists
-    local user_exists=$(echo "$user_db" | jq -r ".users[] | select(.username == \"$username\") | .username")
+    # Allow web GUI port
+    ufw allow 8081/tcp comment 'GX Web GUI'
     
-    if [ -z "$user_exists" ]; then
-        echo -e "${RED}❌ User $username not found${NC}"
-        return
-    fi
-
-    # Delete from system
-    if userdel -r "$username" 2>/dev/null; then
-        # Remove from database
-        local updated_db=$(echo "$user_db" | jq "del(.users[] | select(.username == \"$username\"))")
-        save_user_db "$updated_db"
-        
-        echo -e "${GREEN}✅ User $username deleted successfully${NC}"
-    else
-        echo -e "${RED}❌ Failed to delete user $username${NC}"
-    fi
+    # Allow common web ports
+    ufw allow 80/tcp comment 'HTTP'
+    ufw allow 443/tcp comment 'HTTPS'
+    
+    echo -e "${GREEN}[SUCCESS] Firewall configured${NC}"
 }
 
-# Function to list users with details
-list_tunnel_users() {
-    echo -e "${WHITE}📋 SSH TUNNEL USERS${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+# Function to setup fail2ban
+setup_fail2ban() {
+    echo -e "${YELLOW}[INFO] Setting up Fail2Ban...${NC}"
     
-    local user_db=$(load_user_db)
-    local users=$(echo "$user_db" | jq -r '.users[] | "\(.username)|\(.password)|\(.created)|\(.expires)|\(.max_connections)"' 2>/dev/null)
-    
-    if [ -z "$users" ]; then
-        echo -e "${YELLOW}⚠️  No users found${NC}"
-        return
-    fi
+    # Create fail2ban jail for SSH
+    cat > /etc/fail2ban/jail.d/sshd.local << EOF
+[sshd]
+enabled = true
+port = ssh
+filter = sshd
+logpath = /var/log/auth.log
+maxretry = 3
+bantime = 3600
+EOF
 
-    echo -e "${WHITE}┌─────────────────────────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${WHITE}│ ${GREEN}Username${WHITE}     ${GREEN}Password${WHITE}     ${GREEN}Created${WHITE}     ${GREEN}Expires${WHITE}     ${GREEN}Max Conn${WHITE}     ${GREEN}Status${WHITE}    │${NC}"
-    echo -e "${WHITE}├─────────────────────────────────────────────────────────────────────────────────┤${NC}"
+    # Restart fail2ban
+    systemctl restart fail2ban
     
-    while IFS='|' read -r username password created expires max_conn; do
-        # Check if account is expired
-        if [ "$expires" != "null" ] && [ -n "$expires" ]; then
-            current_ts=$(date +%s)
-            expire_ts=$(date -d "$expires" +%s 2>/dev/null || echo 0)
-            if [ $current_ts -gt $expire_ts ]; then
-                status="${RED}EXPIRED${NC}"
-            else
-                days_left=$(( (expire_ts - current_ts) / 86400 ))
-                status="${GREEN}$days_left days${NC}"
-            fi
-        else
-            status="${GREEN}ACTIVE${NC}"
-        fi
-        
-        printf "${WHITE}│ ${CYAN}%-12s ${YELLOW}%-12s ${BLUE}%-10s ${WHITE}%-10s ${PURPLE}%-12s ${WHITE}%-12s ${WHITE}│${NC}\n" \
-               "$username" "$password" "$created" "${expires:-Never}" "$max_conn" "$status"
-    done <<< "$users"
-    
-    echo -e "${WHITE}└─────────────────────────────────────────────────────────────────────────────────┘${NC}"
+    echo -e "${GREEN}[SUCCESS] Fail2Ban configured${NC}"
 }
 
-# Function to show service status
-show_service_status() {
-    echo -e "${WHITE}📊 SERVICE STATUS${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+# Function to verify installation
+verify_installation() {
+    echo -e "${YELLOW}[INFO] Verifying installation...${NC}"
     
-    local server_ip=$(get_server_ip)
-    local tunnel_status=$(systemctl is-active "$GX_TUNNEL_SERVICE")
-    local webgui_status=$(systemctl is-active "$GX_WEBGUI_SERVICE")
+    local errors=0
     
-    echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
-    
-    if [ "$tunnel_status" = "active" ]; then
-        echo -e "${WHITE}│ ${GREEN}🟢 Tunnel Service: ${GREEN}ACTIVE${WHITE}                            │${NC}"
-    else
-        echo -e "${WHITE}│ ${RED}🔴 Tunnel Service: ${RED}INACTIVE${WHITE}                          │${NC}"
+    # Check if files exist
+    if [ ! -f "$PYTHON_SCRIPT_PATH" ]; then
+        echo -e "${RED}[ERROR] Main tunnel script missing${NC}"
+        ((errors++))
     fi
     
-    if [ "$webgui_status" = "active" ]; then
-        echo -e "${WHITE}│ ${GREEN}🟢 Web GUI: ${GREEN}ACTIVE${WHITE}                                 │${NC}"
-    else
-        echo -e "${WHITE}│ ${RED}🔴 Web GUI: ${RED}INACTIVE${WHITE}                               │${NC}"
+    if [ ! -f "$WEBGUI_SCRIPT_PATH" ]; then
+        echo -e "${RED}[ERROR] Web GUI script missing${NC}"
+        ((errors++))
     fi
     
-    echo -e "${WHITE}│ ${CYAN}📍 Server IP: ${YELLOW}$server_ip${WHITE}                         │${NC}"
-    echo -e "${WHITE}│ ${CYAN}🌐 Tunnel Port: ${YELLOW}8080${WHITE}                               │${NC}"
-    echo -e "${WHITE}│ ${CYAN}🖥️  Web GUI Port: ${YELLOW}8081${WHITE}                              │${NC}"
-    echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
-}
-
-# Function to show VPS statistics
-show_vps_stats() {
-    echo -e "${WHITE}💻 VPS STATISTICS${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    if [ ! -f "/usr/local/bin/gx-tunnel" ]; then
+        echo -e "${RED}[ERROR] Management script missing${NC}"
+        ((errors++))
+    fi
     
-    local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
-    local memory_info=$(free -m | awk 'NR==2{printf "%.2f%%", $3*100/$2}')
-    local disk_usage=$(df -h / | awk 'NR==2{print $5}')
-    local uptime=$(uptime -p)
-    local server_ip=$(get_server_ip)
+    # Check if services are installed
+    if [ ! -f "/etc/systemd/system/$GX_TUNNEL_SERVICE.service" ]; then
+        echo -e "${RED}[ERROR] Tunnel service missing${NC}"
+        ((errors++))
+    fi
     
-    echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${WHITE}│ ${CYAN}📍 Server IP: ${YELLOW}$server_ip${WHITE}                         │${NC}"
-    echo -e "${WHITE}│ ${CYAN}🖥️  CPU Usage: ${YELLOW}$cpu_usage%${WHITE}                               │${NC}"
-    echo -e "${WHITE}│ ${CYAN}💾 Memory Usage: ${YELLOW}$memory_info${WHITE}                            │${NC}"
-    echo -e "${WHITE}│ ${CYAN}💿 Disk Usage: ${YELLOW}$disk_usage${WHITE}                               │${NC}"
-    echo -e "${WHITE}│ ${CYAN}⏱️  Uptime: ${YELLOW}$uptime${WHITE}                           │${NC}"
-    echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
+    if [ ! -f "/etc/systemd/system/$GX_WEBGUI_SERVICE.service" ]; then
+        echo -e "${RED}[ERROR] Web GUI service missing${NC}"
+        ((errors++))
+    fi
+    
+    # Check Python packages
+    if ! python3 -c "import flask, flask_cors, psutil" &>/dev/null; then
+        echo -e "${RED}[ERROR] Python packages not installed properly${NC}"
+        ((errors++))
+    fi
+    
+    if [ $errors -eq 0 ]; then
+        echo -e "${GREEN}[SUCCESS] Installation verified successfully${NC}"
+        return 0
+    else
+        echo -e "${RED}[ERROR] Installation verification failed with $errors errors${NC}"
+        return 1
+    fi
 }
 
 # Function to start services
 start_services() {
-    echo -e "${WHITE}🚀 STARTING GX TUNNEL SERVICES${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    echo -e "${YELLOW}[INFO] Starting services...${NC}"
     
     systemctl start "$GX_TUNNEL_SERVICE"
     systemctl start "$GX_WEBGUI_SERVICE"
-    sleep 2
-    show_service_status
-}
-
-# Function to stop services
-stop_services() {
-    echo -e "${WHITE}🛑 STOPPING GX TUNNEL SERVICES${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
     
-    systemctl stop "$GX_TUNNEL_SERVICE"
-    systemctl stop "$GX_WEBGUI_SERVICE"
-    sleep 2
-    show_service_status
-}
-
-# Function to restart services
-restart_services() {
-    echo -e "${WHITE}🔄 RESTARTING GX TUNNEL SERVICES${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    sleep 3
     
-    systemctl restart "$GX_TUNNEL_SERVICE"
-    systemctl restart "$GX_WEBGUI_SERVICE"
-    sleep 2
-    show_service_status
+    # Check if services are running
+    local tunnel_status=$(systemctl is-active "$GX_TUNNEL_SERVICE")
+    local webgui_status=$(systemctl is-active "$GX_WEBGUI_SERVICE")
+    
+    if [ "$tunnel_status" = "active" ] && [ "$webgui_status" = "active" ]; then
+        echo -e "${GREEN}[SUCCESS] Services started successfully${NC}"
+        return 0
+    else
+        echo -e "${RED}[ERROR] Failed to start services${NC}"
+        echo -e "${YELLOW}Tunnel status: $tunnel_status${NC}"
+        echo -e "${YELLOW}Web GUI status: $webgui_status${NC}"
+        return 1
+    fi
 }
 
-# Function to show real-time logs
-show_realtime_logs() {
-    echo -e "${WHITE}📋 REAL-TIME LOGS${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-    echo -e "${YELLOW}Press Ctrl+C to stop viewing logs${NC}"
+# Function to show installation summary
+show_installation_summary() {
+    local server_ip=$(hostname -I | awk '{print $1}')
+    
+    echo -e "${GREEN}"
+    echo -e "┌─────────────────────────────────────────────────────────┐"
+    echo -e "│                 🎉 INSTALLATION COMPLETE!               │"
+    echo -e "└─────────────────────────────────────────────────────────┘"
+    echo -e "${NC}"
+    echo -e "${WHITE}📋 Installation Summary:${NC}"
+    echo -e "${CYAN}├─ 📁 Installation Directory: $INSTALL_DIR${NC}"
+    echo -e "${CYAN}├─ 📝 Log Directory: $LOG_DIR${NC}"
+    echo -e "${CYAN}├─ 🔧 Management Command: gx-tunnel${NC}"
+    echo -e "${CYAN}├─ 🚀 Tunnel Service: $GX_TUNNEL_SERVICE${NC}"
+    echo -e "${CYAN}├─ 🌐 Web GUI Service: $GX_WEBGUI_SERVICE${NC}"
+    echo -e "${CYAN}├─ 🔒 Fail2Ban: Enabled${NC}"
+    echo -e "${CYAN}└─ 🔥 UFW Firewall: Configured${NC}"
+    echo
+    echo -e "${WHITE}🌐 Access Information:${NC}"
+    echo -e "${YELLOW}├─ Tunnel URL: ws://$server_ip:8080${NC}"
+    echo -e "${YELLOW}├─ Web GUI: http://$server_ip:8081${NC}"
+    echo -e "${YELLOW}└─ Admin Password: admin123${NC}"
+    echo
+    echo -e "${WHITE}🚀 Available Commands:${NC}"
+    echo -e "${GREEN}├─ gx-tunnel menu       - Show interactive menu${NC}"
+    echo -e "${GREEN}├─ gx-tunnel start      - Start services${NC}"
+    echo -e "${GREEN}├─ gx-tunnel stop       - Stop services${NC}"
+    echo -e "${GREEN}├─ gx-tunnel restart    - Restart services${NC}"
+    echo -e "${GREEN}├─ gx-tunnel status     - Show service status${NC}"
+    echo -e "${GREEN}├─ gx-tunnel add-user   - Add new tunnel user${NC}"
+    echo -e "${GREEN}├─ gx-tunnel list-users - List all users${NC}"
+    echo -e "${GREEN}├─ gx-tunnel stats      - Show VPS statistics${NC}"
+    echo -e "${GREEN}├─ gx-tunnel logs       - Show real-time logs${NC}"
+    echo -e "${GREEN}└─ gx-tunnel fix-deps   - Fix missing dependencies${NC}"
+    echo
+    echo -e "${WHITE}⏰ Next Steps:${NC}"
+    echo -e "${BLUE}1. Access the Web GUI at http://$server_ip:8081${NC}"
+    echo -e "${BLUE}2. Use 'gx-tunnel add-user' to create your first user${NC}"
+    echo -e "${BLUE}3. Check service status with 'gx-tunnel status'${NC}"
+    echo
+}
+
+# Main installation function
+main_installation() {
+    show_header
+    echo -e "${GREEN}[GX TUNNEL] Starting installation...${NC}"
     echo
     
-    if [ -f "$LOG_FILE" ]; then
-        tail -f "$LOG_FILE" | while read line; do
-            if [[ $line == *"ERROR"* ]] || [[ $line == *"Failed"* ]]; then
-                echo -e "${RED}$line${NC}"
-            elif [[ $line == *"WARNING"* ]]; then
-                echo -e "${YELLOW}$line${NC}"
-            elif [[ $line == *"Authentication"* ]] && [[ $line == *"successfully"* ]]; then
-                echo -e "${GREEN}$line${NC}"
-            elif [[ $line == *"New tunnel"* ]]; then
-                echo -e "${BLUE}$line${NC}"
-            elif [[ $line == *"Connected"* ]]; then
-                echo -e "${CYAN}$line${NC}"
-            else
-                echo -e "${WHITE}$line${NC}"
-            fi
-        done
-    else
-        echo -e "${RED}Log file not found: $LOG_FILE${NC}"
-    fi
-}
-
-# Function to check and install missing dependencies
-check_dependencies() {
-    local missing_deps=()
-    
-    # Check system dependencies
-    for dep in jq sqlite3; do
-        if ! command -v "$dep" &> /dev/null; then
-            missing_deps+=("$dep")
-        fi
-    done
-    
-    # Check Python dependencies
-    if ! python3 -c "import flask, psutil" &> /dev/null; then
-        missing_deps+=("python-flask")
-    fi
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        echo -e "${YELLOW}Installing missing dependencies: ${missing_deps[*]}${NC}"
-        apt-get update
-        for dep in "${missing_deps[@]}"; do
-            if [ "$dep" == "python-flask" ]; then
-                pip3 install flask flask-cors psutil
-            else
-                apt-get install -y "$dep"
-            fi
-        done
-    fi
-}
-
-# Main menu function
-show_main_menu() {
-    while true; do
-        show_header
-        
-        echo -e "${WHITE}🏠 MAIN MENU${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        echo -e "${WHITE}1) ${GREEN}👤 User Management${NC}"
-        echo -e "${WHITE}2) ${YELLOW}🚀 Service Control${NC}"
-        echo -e "${WHITE}3) ${BLUE}📊 Service Status${NC}"
-        echo -e "${WHITE}4) ${PURPLE}💻 VPS Statistics${NC}"
-        echo -e "${WHITE}5) ${CYAN}📋 View Users${NC}"
-        echo -e "${WHITE}6) ${WHITE}📜 Real-time Logs${NC}"
-        echo -e "${WHITE}7) ${GREEN}🔄 Restart Services${NC}"
-        echo -e "${WHITE}8) ${RED}🛑 Stop Services${NC}"
-        echo -e "${WHITE}9) ${YELLOW}🔧 Fix Dependencies${NC}"
-        echo -e "${WHITE}0) ${RED}❌ Exit${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        
-        read -p "Enter your choice [0-9]: " choice
-        
-        case $choice in
-            1)
-                show_user_management_menu
-                ;;
-            2)
-                start_services
-                read -p "Press Enter to continue..."
-                ;;
-            3)
-                show_service_status
-                read -p "Press Enter to continue..."
-                ;;
-            4)
-                show_vps_stats
-                read -p "Press Enter to continue..."
-                ;;
-            5)
-                list_tunnel_users
-                read -p "Press Enter to continue..."
-                ;;
-            6)
-                show_realtime_logs
-                ;;
-            7)
-                restart_services
-                read -p "Press Enter to continue..."
-                ;;
-            8)
-                stop_services
-                read -p "Press Enter to continue..."
-                ;;
-            9)
-                check_dependencies
-                read -p "Press Enter to continue..."
-                ;;
-            0)
-                echo -e "${GREEN}👋 Thank you for using GX Tunnel!${NC}"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}❌ Invalid choice. Please try again.${NC}"
-                sleep 2
-                ;;
-        esac
-    done
-}
-echo "Installing Python packages..."
-pip3 install --upgrade pip
-pip3 install flask flask-cors psutil
-
-echo "Installation complete!"
-
-# User management menu
-show_user_management_menu() {
-    while true; do
-        show_header
-        
-        echo -e "${WHITE}👤 USER MANAGEMENT${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        echo -e "${WHITE}1) ${GREEN}➕ Add User${NC}"
-        echo -e "${WHITE}2) ${RED}🗑️  Delete User${NC}"
-        echo -e "${WHITE}3) ${BLUE}📋 List Users${NC}"
-        echo -e "${WHITE}4) ${YELLOW}🔙 Back to Main Menu${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        
-        read -p "Enter your choice [1-4]: " choice
-        
-        case $choice in
-            1)
-                add_tunnel_user
-                read -p "Press Enter to continue..."
-                ;;
-            2)
-                delete_tunnel_user
-                read -p "Press Enter to continue..."
-                ;;
-            3)
-                list_tunnel_users
-                read -p "Press Enter to continue..."
-                ;;
-            4)
-                break
-                ;;
-            *)
-                echo -e "${RED}❌ Invalid choice. Please try again.${NC}"
-                sleep 2
-                ;;
-        esac
-    done
-}
-
-# Main execution
-main() {
+    # Execute installation steps
     check_root
-    check_dependencies
-    show_main_menu
+    clean_previous_installation
+    install_system_dependencies
+    install_python_packages
+    create_application_structure
+    download_application_files
+    create_systemd_services
+    setup_firewall
+    setup_fail2ban
+    
+    # Verify installation
+    if verify_installation; then
+        # Start services
+        if start_services; then
+            show_installation_summary
+        else
+            echo -e "${YELLOW}[WARNING] Installation completed but services failed to start${NC}"
+            echo -e "${YELLOW}You can try starting them manually: systemctl start $GX_TUNNEL_SERVICE $GX_WEBGUI_SERVICE${NC}"
+        fi
+    else
+        echo -e "${RED}[ERROR] Installation failed during verification${NC}"
+        exit 1
+    fi
 }
 
-# Handle command line arguments
-case "${1:-}" in
-    "menu")
-        main
-        ;;
-    "start")
-        start_services
-        ;;
-    "stop")
-        stop_services
-        ;;
-    "restart")
-        restart_services
-        ;;
-    "status")
-        show_service_status
-        ;;
-    "add-user")
-        add_tunnel_user
-        ;;
-    "list-users")
-        list_tunnel_users
-        ;;
-    "stats")
-        show_vps_stats
-        ;;
-    "logs")
-        show_realtime_logs
-        ;;
-    "fix-deps")
-        check_dependencies
-        ;;
-    *)
-        echo -e "${GREEN}Usage: $0 {menu|start|stop|restart|status|add-user|list-users|stats|logs|fix-deps}${NC}"
-        echo
-        echo -e "${WHITE}Commands:${NC}"
-        echo -e "  ${CYAN}menu${NC}       - Show interactive menu"
-        echo -e "  ${CYAN}start${NC}      - Start services"
-        echo -e "  ${CYAN}stop${NC}       - Stop services"
-        echo -e "  ${CYAN}restart${NC}    - Restart services"
-        echo -e "  ${CYAN}status${NC}     - Show service status"
-        echo -e "  ${CYAN}add-user${NC}   - Add new tunnel user"
-        echo -e "  ${CYAN}list-users${NC} - List all users"
-        echo -e "  ${CYAN}stats${NC}      - Show VPS statistics"
-        echo -e "  ${CYAN}logs${NC}       - Show real-time logs"
-        echo -e "  ${CYAN}fix-deps${NC}   - Fix missing dependencies"
-        exit 1
-        ;;
-esac
+# Check if script is being sourced or executed directly
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main_installation
+fi
