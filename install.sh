@@ -21,29 +21,16 @@ LOG_DIR="/var/log/gx_tunnel"
 SERVICE_NAME="gx-tunnel"
 WEBGUI_SERVICE="gx-webgui"
 
-# Logging functions
-log_info() {
-    echo -e "${BLUE}[INFO]${NC} $1"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $1"
-}
-
-# Banner
-show_banner() {
+# Beautiful banner function
+display_banner() {
     echo -e "${BLUE}"
     echo -e "┌─────────────────────────────────────────────────────────┐"
     echo -e "│                    ${WHITE}🚀 GX TUNNEL${BLUE}                          │"
-    echo -e "│           ${YELLOW}Complete Installation Script${BLUE}                 │"
+    echo -e "│           ${YELLOW}Advanced WebSocket SSH Tunnel${BLUE}                │"
+    echo -e "│                                                         │"
+    echo -e "│                 ${GREEN}🚀 Features:${BLUE}                            │"
+    echo -e "│    ${GREEN}✅ Web GUI Admin${BLUE}       ${YELLOW}🌐 Real-time Stats${BLUE}          │"
+    echo -e "│    ${CYAN}🔒 Fail2Ban Protection${BLUE}  ${PURPLE}⚡ Unlimited Bandwidth${BLUE}       │"
     echo -e "│                                                         │"
     echo -e "│              ${WHITE}Created by: Jawad${BLUE}                         │"
     echo -e "│           ${YELLOW}Telegram: @jawadx${BLUE}                           │"
@@ -51,50 +38,99 @@ show_banner() {
     echo -e "${NC}"
 }
 
-# Check root
+# Progress banner function
+show_progress_banner() {
+    local step="$1"
+    local description="$2"
+    echo -e "${CYAN}"
+    echo -e "┌─────────────────────────────────────────────────────────┐"
+    echo -e "│   ${WHITE}🔄 [$step] ${YELLOW}$description${CYAN}"
+    echo -e "└─────────────────────────────────────────────────────────┘"
+    echo -e "${NC}"
+}
+
+# Success banner function
+show_success_banner() {
+    local message="$1"
+    echo -e "${GREEN}"
+    echo -e "┌─────────────────────────────────────────────────────────┐"
+    echo -e "│   ${WHITE}✅ SUCCESS: ${GREEN}$message${GREEN}"
+    echo -e "└─────────────────────────────────────────────────────────┘"
+    echo -e "${NC}"
+}
+
+# Logging functions with pretty formatting
+log_info() {
+    echo -e "${BLUE}📦 [INFO]${NC} ${WHITE}$1${NC}"
+}
+
+log_success() {
+    echo -e "${GREEN}✅ [SUCCESS]${NC} ${WHITE}$1${NC}"
+}
+
+log_warning() {
+    echo -e "${YELLOW}⚠️ [WARNING]${NC} ${WHITE}$1${NC}"
+}
+
+log_error() {
+    echo -e "${RED}❌ [ERROR]${NC} ${WHITE}$1${NC}"
+}
+
+# Step indicator function
+show_step() {
+    local step_num="$1"
+    local step_name="$2"
+    echo -e "${PURPLE}✨ [Step $step_num] ${CYAN}$step_name${NC}"
+}
+
+# Check root with pretty output
 check_root() {
+    show_progress_banner "1" "Checking Privileges"
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root"
+        echo -e "${RED}Please run as: ${WHITE}sudo bash install.sh${NC}"
         exit 1
     fi
-    log_success "Running as root user"
+    log_success "Root privileges verified"
+    echo
 }
 
 # Clean previous installation
-clean_installation() {
-    log_info "Cleaning previous installation..."
+clean_previous_installation() {
+    show_progress_banner "2" "Cleaning Previous Installation"
     
-    # Stop services
+    log_info "Stopping services..."
     systemctl stop "$SERVICE_NAME" 2>/dev/null || true
     systemctl stop "$WEBGUI_SERVICE" 2>/dev/null || true
     
-    # Disable services
+    log_info "Disabling services..."
     systemctl disable "$SERVICE_NAME" 2>/dev/null || true
     systemctl disable "$WEBGUI_SERVICE" 2>/dev/null || true
     
-    # Remove services
+    log_info "Removing service files..."
     rm -f /etc/systemd/system/"$SERVICE_NAME".service
     rm -f /etc/systemd/system/"$WEBGUI_SERVICE".service
     
-    # Remove directories
+    log_info "Removing directories..."
     rm -rf "$INSTALL_DIR"
     rm -rf "$LOG_DIR"
     
-    # Remove binary
+    log_info "Removing binary..."
     rm -f /usr/local/bin/gx-tunnel
     
     systemctl daemon-reload
-    log_success "Previous installation cleaned"
+    show_success_banner "Previous installation cleaned completely"
+    echo
 }
 
 # Install system dependencies
 install_dependencies() {
-    log_info "Installing system dependencies..."
+    show_progress_banner "3" "Installing System Dependencies"
     
-    # Update package list
+    log_info "Updating package list..."
     apt-get update -qq
     
-    # Install system packages
+    log_info "Installing required packages..."
     apt-get install -y -qq \
         python3 \
         python3-pip \
@@ -108,49 +144,58 @@ install_dependencies() {
         sqlite3 \
         fail2ban
     
-    log_success "System dependencies installed"
+    show_success_banner "All system dependencies installed"
+    echo
 }
 
 # Install Python packages
 install_python_packages() {
-    log_info "Installing Python packages..."
+    show_progress_banner "4" "Installing Python Packages"
     
-    # Upgrade pip
+    log_info "Upgrading pip..."
     pip3 install --upgrade pip --quiet
     
-    # Install required packages
+    log_info "Installing Flask, Flask-CORS, and Psutil..."
     pip3 install flask flask-cors psutil --quiet
     
-    log_success "Python packages installed"
+    show_success_banner "Python packages installed successfully"
+    echo
 }
 
 # Create directory structure
 create_directories() {
-    log_info "Creating directory structure..."
+    show_progress_banner "5" "Creating Directory Structure"
     
+    log_info "Creating installation directory..."
     mkdir -p "$INSTALL_DIR"
+    
+    log_info "Creating log directory..."
     mkdir -p "$LOG_DIR"
     
     chmod 755 "$INSTALL_DIR"
     chmod 755 "$LOG_DIR"
     
-    log_success "Directories created"
+    show_success_banner "Directory structure created"
+    echo
 }
 
 # Download application files
 download_files() {
-    log_info "Downloading application files..."
+    show_progress_banner "6" "Downloading Application Files"
     
     local base_url="https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main"
     
-    # Download main application files
+    log_info "Downloading main tunnel script..."
     wget -q "$base_url/gx_websocket.py" -O "$INSTALL_DIR/gx_websocket.py"
-    wget -q "$base_url/webgui.py" -O "$INSTALL_DIR/webgui.py"
-    wget -q "$base_url/gx-tunnel.sh" -O /usr/local/bin/gx-tunnel
     
+    log_info "Downloading web GUI script..."
+    wget -q "$base_url/webgui.py" -O "$INSTALL_DIR/webgui.py"
+    
+    log_info "Downloading management script..."
+    wget -q "$base_url/gx-tunnel.sh" -O /usr/local/bin/gx-tunnel
     chmod +x /usr/local/bin/gx-tunnel
     
-    # Create users database
+    log_info "Creating users database..."
     cat > "$INSTALL_DIR/users.json" << 'EOF'
 {
     "users": [],
@@ -162,17 +207,18 @@ download_files() {
 }
 EOF
 
-    # Create empty statistics database
+    log_info "Creating statistics database..."
     touch "$INSTALL_DIR/statistics.db"
     
-    log_success "Application files downloaded"
+    show_success_banner "All application files downloaded"
+    echo
 }
 
 # Create systemd services
 create_services() {
-    log_info "Creating systemd services..."
+    show_progress_banner "7" "Creating System Services"
     
-    # Main tunnel service
+    log_info "Creating tunnel service..."
     cat > /etc/systemd/system/"$SERVICE_NAME".service << EOF
 [Unit]
 Description=GX Tunnel WebSocket Service
@@ -192,7 +238,7 @@ StandardError=append:$LOG_DIR/websocket.log
 WantedBy=multi-user.target
 EOF
 
-    # Web GUI service
+    log_info "Creating web GUI service..."
     cat > /etc/systemd/system/"$WEBGUI_SERVICE".service << EOF
 [Unit]
 Description=GX Tunnel Web GUI
@@ -214,31 +260,33 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    log_success "Systemd services created"
+    show_success_banner "Systemd services created and configured"
+    echo
 }
 
 # Setup firewall
 setup_firewall() {
-    log_info "Setting up firewall..."
+    show_progress_banner "8" "Configuring Firewall"
     
-    # Enable UFW
+    log_info "Enabling UFW firewall..."
     ufw --force enable > /dev/null 2>&1 || true
     
-    # Allow necessary ports
+    log_info "Configuring firewall rules..."
     ufw allow 22/tcp comment 'SSH' > /dev/null 2>&1
     ufw allow 8080/tcp comment 'GX Tunnel' > /dev/null 2>&1
     ufw allow 8081/tcp comment 'GX Web GUI' > /dev/null 2>&1
     ufw allow 80/tcp comment 'HTTP' > /dev/null 2>&1
     ufw allow 443/tcp comment 'HTTPS' > /dev/null 2>&1
     
-    log_success "Firewall configured"
+    show_success_banner "Firewall configured with all necessary ports"
+    echo
 }
 
 # Setup fail2ban
 setup_fail2ban() {
-    log_info "Setting up Fail2Ban..."
+    show_progress_banner "9" "Setting Up Fail2Ban Protection"
     
-    # Create basic SSH jail
+    log_info "Configuring SSH protection..."
     cat > /etc/fail2ban/jail.d/sshd.local << EOF
 [sshd]
 enabled = true
@@ -250,30 +298,31 @@ bantime = 3600
 EOF
 
     systemctl restart fail2ban
-    log_success "Fail2Ban configured"
+    show_success_banner "Fail2Ban protection activated"
+    echo
 }
 
 # Verify installation
 verify_installation() {
-    log_info "Verifying installation..."
+    show_progress_banner "10" "Verifying Installation"
     
     local errors=0
     
-    # Check files
+    log_info "Checking application files..."
     [ -f "$INSTALL_DIR/gx_websocket.py" ] || { log_error "Main tunnel script missing"; ((errors++)); }
     [ -f "$INSTALL_DIR/webgui.py" ] || { log_error "Web GUI script missing"; ((errors++)); }
     [ -f "/usr/local/bin/gx-tunnel" ] || { log_error "Management script missing"; ((errors++)); }
     [ -f "/etc/systemd/system/$SERVICE_NAME.service" ] || { log_error "Tunnel service missing"; ((errors++)); }
     [ -f "/etc/systemd/system/$WEBGUI_SERVICE.service" ] || { log_error "Web GUI service missing"; ((errors++)); }
     
-    # Check Python packages
+    log_info "Checking Python packages..."
     python3 -c "import flask, flask_cors, psutil" > /dev/null 2>&1 || { 
         log_error "Python packages not installed properly"; 
         ((errors++)); 
     }
     
     if [ $errors -eq 0 ]; then
-        log_success "Installation verified successfully"
+        show_success_banner "Installation verified successfully"
         return 0
     else
         log_error "Installation verification failed with $errors errors"
@@ -283,9 +332,12 @@ verify_installation() {
 
 # Start services
 start_services() {
-    log_info "Starting services..."
+    show_progress_banner "11" "Starting Services"
     
+    log_info "Enabling services..."
     systemctl enable "$SERVICE_NAME" "$WEBGUI_SERVICE"
+    
+    log_info "Starting services..."
     systemctl start "$SERVICE_NAME" "$WEBGUI_SERVICE"
     
     sleep 3
@@ -294,7 +346,7 @@ start_services() {
     local webgui_status=$(systemctl is-active "$WEBGUI_SERVICE")
     
     if [ "$tunnel_status" = "active" ] && [ "$webgui_status" = "active" ]; then
-        log_success "Services started successfully"
+        show_success_banner "All services started successfully"
         return 0
     else
         log_warning "Services partially started (Tunnel: $tunnel_status, WebGUI: $webgui_status)"
@@ -302,8 +354,8 @@ start_services() {
     fi
 }
 
-# Show installation summary
-show_summary() {
+# Beautiful installation summary
+show_installation_summary() {
     local server_ip=$(hostname -I | awk '{print $1}')
     
     echo
@@ -313,38 +365,42 @@ show_summary() {
     echo -e "└─────────────────────────────────────────────────────────┘"
     echo -e "${NC}"
     echo
-    echo -e "${WHITE}📋 Installation Details:${NC}"
-    echo -e "  ${CYAN}• Installation: ${GREEN}$INSTALL_DIR${NC}"
-    echo -e "  ${CYAN}• Logs: ${GREEN}$LOG_DIR${NC}"
-    echo -e "  ${CYAN}• Management: ${GREEN}gx-tunnel${NC}"
+    echo -e "${WHITE}📋 ${CYAN}Installation Details:${NC}"
+    echo -e "  ${BLUE}└─ ${YELLOW}Installation: ${GREEN}$INSTALL_DIR${NC}"
+    echo -e "  ${BLUE}└─ ${YELLOW}Logs: ${GREEN}$LOG_DIR${NC}"
+    echo -e "  ${BLUE}└─ ${YELLOW}Management: ${GREEN}gx-tunnel${NC}"
     echo
-    echo -e "${WHITE}🌐 Access Information:${NC}"
-    echo -e "  ${YELLOW}• Tunnel: ${GREEN}ws://$server_ip:8080${NC}"
-    echo -e "  ${YELLOW}• Web GUI: ${GREEN}http://$server_ip:8081${NC}"
-    echo -e "  ${YELLOW}• Admin Password: ${GREEN}admin123${NC}"
+    echo -e "${WHITE}🌐 ${CYAN}Access Information:${NC}"
+    echo -e "  ${BLUE}└─ ${YELLOW}Tunnel: ${GREEN}ws://$server_ip:8080${NC}"
+    echo -e "  ${BLUE}└─ ${YELLOW}Web GUI: ${GREEN}http://$server_ip:8081${NC}"
+    echo -e "  ${BLUE}└─ ${YELLOW}Admin Password: ${GREEN}admin123${NC}"
     echo
-    echo -e "${WHITE}🚀 Available Commands:${NC}"
-    echo -e "  ${GREEN}gx-tunnel menu${NC}       - Show interactive menu"
-    echo -e "  ${GREEN}gx-tunnel start${NC}      - Start services"
-    echo -e "  ${GREEN}gx-tunnel status${NC}     - Show service status"
-    echo -e "  ${GREEN}gx-tunnel add-user${NC}   - Add tunnel user"
-    echo -e "  ${GREEN}gx-tunnel list-users${NC} - List all users"
+    echo -e "${WHITE}🚀 ${CYAN}Available Commands:${NC}"
+    echo -e "  ${GREEN}└─ gx-tunnel menu${NC}       - Show interactive menu"
+    echo -e "  ${GREEN}└─ gx-tunnel start${NC}      - Start services"
+    echo -e "  ${GREEN}└─ gx-tunnel status${NC}     - Show service status"
+    echo -e "  ${GREEN}└─ gx-tunnel add-user${NC}   - Add tunnel user"
+    echo -e "  ${GREEN}└─ gx-tunnel list-users${NC} - List all users"
     echo
-    echo -e "${WHITE}⏰ Next Steps:${NC}"
-    echo -e "  1. ${BLUE}Access Web GUI: http://$server_ip:8081${NC}"
-    echo -e "  2. ${BLUE}Add user: gx-tunnel add-user${NC}"
-    echo -e "  3. ${BLUE}Check status: gx-tunnel status${NC}"
+    echo -e "${WHITE}⏰ ${CYAN}Next Steps:${NC}"
+    echo -e "  ${BLUE}1. ${YELLOW}Access Web GUI: ${GREEN}http://$server_ip:8081${NC}"
+    echo -e "  ${BLUE}2. ${YELLOW}Add user: ${GREEN}gx-tunnel add-user${NC}"
+    echo -e "  ${BLUE}3. ${YELLOW}Check status: ${GREEN}gx-tunnel status${NC}"
+    echo
+    echo -e "${PURPLE}💫 ${WHITE}Thank you for choosing GX Tunnel!${NC}"
     echo
 }
 
 # Main installation function
 main() {
-    show_banner
-    log_info "Starting GX Tunnel installation..."
+    display_banner
+    echo
+    echo -e "${GREEN}🚀 [GX TUNNEL] Starting installation...${NC}"
+    echo
     
     # Execute installation steps
     check_root
-    clean_installation
+    clean_previous_installation
     install_dependencies
     install_python_packages
     create_directories
@@ -356,9 +412,14 @@ main() {
     # Verify and start
     if verify_installation; then
         start_services
-        show_summary
+        show_installation_summary
     else
-        log_error "Installation failed verification"
+        echo -e "${RED}"
+        echo -e "┌─────────────────────────────────────────────────────────┐"
+        echo -e "│                   ❌ INSTALLATION FAILED!                │"
+        echo -e "└─────────────────────────────────────────────────────────┘"
+        echo -e "${NC}"
+        log_error "Please check the errors above and try again"
         exit 1
     fi
 }
