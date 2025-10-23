@@ -171,6 +171,58 @@ class UserManager:
 class StatisticsManager:
     def __init__(self, db_path):
         self.db_path = db_path
+        self.init_database()
+    
+    def init_database(self):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Create tables if they don't exist
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_stats (
+                    username TEXT PRIMARY KEY,
+                    connections INTEGER DEFAULT 0,
+                    download_bytes INTEGER DEFAULT 0,
+                    upload_bytes INTEGER DEFAULT 0,
+                    last_connection TEXT
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS global_stats (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS connection_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT,
+                    client_ip TEXT,
+                    start_time TEXT,
+                    duration INTEGER,
+                    download_bytes INTEGER,
+                    upload_bytes INTEGER
+                )
+            ''')
+            
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS security_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_type TEXT,
+                    client_ip TEXT,
+                    username TEXT,
+                    description TEXT,
+                    timestamp TEXT
+                )
+            ''')
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            print(f"Database initialization error: {e}")
     
     def get_user_stats(self, username):
         try:
@@ -192,8 +244,8 @@ class StatisticsManager:
                     'upload_bytes': result[2],
                     'last_connection': result[3]
                 }
-        except:
-            pass
+        except Exception as e:
+            print(f"Error getting user stats: {e}")
         return None
     
     def get_global_stats(self):
@@ -208,7 +260,8 @@ class StatisticsManager:
             
             conn.close()
             return stats
-        except:
+        except Exception as e:
+            print(f"Error getting global stats: {e}")
             return {}
     
     def get_recent_connections(self, limit=10):
@@ -236,7 +289,8 @@ class StatisticsManager:
             
             conn.close()
             return connections
-        except:
+        except Exception as e:
+            print(f"Error getting recent connections: {e}")
             return []
 
 def get_system_stats():
@@ -468,7 +522,7 @@ MODERN_LOGIN = '''
             
             <div class="form-group">
                 <label for="password">Password</label>
-                <input type="password" id="password" name="password" value="admin123" required>
+                <input type="password" id="password" name="password" placeholder="Enter password" required>
             </div>
             
             <button type="submit" class="btn">Login to Dashboard</button>
@@ -640,7 +694,7 @@ MODERN_DASHBOARD = '''
             box-shadow: 0 2px 10px rgba(0,0,0,0.1);
             margin-bottom: 20px;
             display: flex;
-            justify-content: between;
+            justify-content: space-between;
             align-items: center;
         }
         
@@ -1103,7 +1157,7 @@ MODERN_DASHBOARD = '''
         async function loadUsersPage() {
             return `
                 <div class="content-area">
-                    <div style="display: flex; justify-content: between; align-items: center; margin-bottom: 20px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                         <h2>User Management</h2>
                         <button class="btn btn-success" onclick="openModal('addUserModal')">
                             ➕ Add New User
@@ -1333,8 +1387,16 @@ def index():
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
-        username = request.form.get('username')
-        password = request.form.get('password')
+        # Handle both JSON and form data
+        if request.is_json:
+            data = request.get_json()
+            username = data.get('username')
+            password = data.get('password')
+        else:
+            username = request.form.get('username')
+            password = request.form.get('password')
+        
+        print(f"Login attempt - Username: {username}, Password: {password}")  # Debug log
         
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             session['admin'] = True
@@ -1357,7 +1419,6 @@ def get_users():
         return jsonify({'error': 'Unauthorized'}), 401
     
     users, settings = user_manager.load_users()
-    stats_manager = StatisticsManager(STATS_DB)
     
     # Add statistics and status to users
     for user in users:
@@ -1535,4 +1596,5 @@ if __name__ == '__main__':
     print("🚀 Starting GX Tunnel Web GUI on port 8081...")
     print("📧 Admin Login: admin / admin123")
     print("🌐 Access: http://your-server-ip:8081")
+    print("🔧 Debug: Check /var/log/gx_tunnel/webgui.log for details")
     app.run(host='0.0.0.0', port=8081, debug=False)
