@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-from flask import Flask, render_template, request, jsonify, session, redirect, url_for
+from flask import Flask, request, jsonify, session, redirect, url_for
 from flask_cors import CORS
 import json
 import sqlite3
@@ -63,8 +63,8 @@ class UserManager:
         
         # Create system user
         try:
-            subprocess.run(['useradd', '-m', '-s', '/usr/sbin/nologin', username], check=True)
-            subprocess.run(['chpasswd'], input=f"{username}:{password}", text=True, check=True)
+            subprocess.run(['useradd', '-m', '-s', '/usr/sbin/nologin', username], check=True, capture_output=True)
+            subprocess.run(['chpasswd'], input=f"{username}:{password}", text=True, check=True, capture_output=True)
         except subprocess.CalledProcessError as e:
             return False, f"Failed to create system user: {str(e)}"
         
@@ -77,7 +77,7 @@ class UserManager:
         
         # Delete system user
         try:
-            subprocess.run(['userdel', '-r', username], check=True)
+            subprocess.run(['userdel', '-r', username], check=True, capture_output=True)
         except subprocess.CalledProcessError:
             pass  # User might not exist in system
         
@@ -88,62 +88,71 @@ class StatisticsManager:
         self.db_path = db_path
     
     def get_user_stats(self, username):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT connections, download_bytes, upload_bytes, last_connection
-            FROM user_stats WHERE username = ?
-        ''', (username,))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return {
-                'connections': result[0],
-                'download_bytes': result[1],
-                'upload_bytes': result[2],
-                'last_connection': result[3]
-            }
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT connections, download_bytes, upload_bytes, last_connection
+                FROM user_stats WHERE username = ?
+            ''', (username,))
+            
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return {
+                    'connections': result[0],
+                    'download_bytes': result[1],
+                    'upload_bytes': result[2],
+                    'last_connection': result[3]
+                }
+        except:
+            pass
         return None
     
     def get_global_stats(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        stats = {}
-        cursor.execute('SELECT key, value FROM global_stats')
-        for row in cursor.fetchall():
-            stats[row[0]] = row[1]
-        
-        conn.close()
-        return stats
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            stats = {}
+            cursor.execute('SELECT key, value FROM global_stats')
+            for row in cursor.fetchall():
+                stats[row[0]] = row[1]
+            
+            conn.close()
+            return stats
+        except:
+            return {}
     
     def get_recent_connections(self, limit=10):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT username, client_ip, start_time, duration, download_bytes, upload_bytes
-            FROM connection_log 
-            ORDER BY id DESC 
-            LIMIT ?
-        ''', (limit,))
-        
-        connections = []
-        for row in cursor.fetchall():
-            connections.append({
-                'username': row[0],
-                'client_ip': row[1],
-                'start_time': row[2],
-                'duration': row[3],
-                'download_bytes': row[4],
-                'upload_bytes': row[5]
-            })
-        
-        conn.close()
-        return connections
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute('''
+                SELECT username, client_ip, start_time, duration, download_bytes, upload_bytes
+                FROM connection_log 
+                ORDER BY id DESC 
+                LIMIT ?
+            ''', (limit,))
+            
+            connections = []
+            for row in cursor.fetchall():
+                connections.append({
+                    'username': row[0],
+                    'client_ip': row[1],
+                    'start_time': row[2],
+                    'duration': row[3],
+                    'download_bytes': row[4],
+                    'upload_bytes': row[5]
+                })
+            
+            conn.close()
+            return connections
+        except:
+            return []
 
 def get_system_stats():
     try:
@@ -184,7 +193,8 @@ def get_system_stats():
             'network': network_stats,
             'uptime': str(uptime).split('.')[0]
         }
-    except:
+    except Exception as e:
+        print(f"Error getting system stats: {e}")
         return {
             'cpu_usage': 0,
             'memory_usage': 0,
@@ -211,6 +221,7 @@ def bytes_to_human(bytes_size):
 def index():
     if 'admin' not in session:
         return redirect(url_for('login'))
+    
     return '''
 <!DOCTYPE html>
 <html>
@@ -499,6 +510,7 @@ def index():
                 
             } catch (error) {
                 console.error('Error loading stats:', error);
+                document.getElementById('dashboardStats').innerHTML = '<p>Error loading dashboard data</p>';
             }
         }
         
@@ -510,12 +522,18 @@ def index():
                 displayUsers(data.users);
             } catch (error) {
                 console.error('Error loading users:', error);
+                document.getElementById('usersTable').innerHTML = '<tr><td colspan="7">Error loading users</td></tr>';
             }
         }
         
         function displayUsers(users) {
             const tbody = document.getElementById('usersTable');
             tbody.innerHTML = '';
+            
+            if (users.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="7">No users found</td></tr>';
+                return;
+            }
             
             users.forEach(user => {
                 const row = document.createElement('tr');
@@ -525,7 +543,7 @@ def index():
                     <td>${user.created}</td>
                     <td>${user.expires || 'Never'}</td>
                     <td>${user.max_connections || 3}</td>
-                    <td>${user.status}</td>
+                    <td>${user.status || 'Active'}</td>
                     <td>
                         <button class="btn btn-danger btn-sm" onclick="deleteUser('${user.username}')">Delete</button>
                     </td>
@@ -634,18 +652,22 @@ def index():
             // Update recent connections
             let connectionsHtml = '<table><thead><tr><th>User</th><th>IP</th><th>Time</th><th>Duration</th><th>Download</th><th>Upload</th></tr></thead><tbody>';
             
-            data.recent_connections.forEach(conn => {
-                connectionsHtml += `
-                    <tr>
-                        <td>${conn.username}</td>
-                        <td>${conn.client_ip}</td>
-                        <td>${new Date(conn.start_time).toLocaleString()}</td>
-                        <td>${conn.duration}s</td>
-                        <td>${formatBytes(conn.download_bytes)}</td>
-                        <td>${formatBytes(conn.upload_bytes)}</td>
-                    </tr>
-                `;
-            });
+            if (data.recent_connections && data.recent_connections.length > 0) {
+                data.recent_connections.forEach(conn => {
+                    connectionsHtml += `
+                        <tr>
+                            <td>${conn.username}</td>
+                            <td>${conn.client_ip}</td>
+                            <td>${new Date(conn.start_time).toLocaleString()}</td>
+                            <td>${conn.duration}s</td>
+                            <td>${formatBytes(conn.download_bytes)}</td>
+                            <td>${formatBytes(conn.upload_bytes)}</td>
+                        </tr>
+                    `;
+                });
+            } else {
+                connectionsHtml += '<tr><td colspan="6">No recent connections</td></tr>';
+            }
             
             connectionsHtml += '</tbody></table>';
             document.getElementById('recentConnections').innerHTML = connectionsHtml;
@@ -922,8 +944,8 @@ def restart_services():
         return jsonify({'success': False, 'message': 'Unauthorized'}), 401
     
     try:
-        subprocess.run(['systemctl', 'restart', 'gx-tunnel'], check=True)
-        subprocess.run(['systemctl', 'restart', 'gx-webgui'], check=True)
+        subprocess.run(['systemctl', 'restart', 'gx-tunnel'], check=True, capture_output=True)
+        subprocess.run(['systemctl', 'restart', 'gx-webgui'], check=True, capture_output=True)
         return jsonify({'success': True, 'message': 'Services restarted successfully'})
     except subprocess.CalledProcessError as e:
         return jsonify({'success': False, 'message': f'Failed to restart services: {str(e)}'})
@@ -934,8 +956,8 @@ def stop_services():
         return jsonify({'success': False, 'message': 'Unauthorized'}), 401
     
     try:
-        subprocess.run(['systemctl', 'stop', 'gx-tunnel'], check=True)
-        subprocess.run(['systemctl', 'stop', 'gx-webgui'], check=True)
+        subprocess.run(['systemctl', 'stop', 'gx-tunnel'], check=True, capture_output=True)
+        subprocess.run(['systemctl', 'stop', 'gx-webgui'], check=True, capture_output=True)
         return jsonify({'success': True, 'message': 'Services stopped successfully'})
     except subprocess.CalledProcessError as e:
         return jsonify({'success': False, 'message': f'Failed to stop services: {str(e)}'})
@@ -946,11 +968,12 @@ def start_services():
         return jsonify({'success': False, 'message': 'Unauthorized'}), 401
     
     try:
-        subprocess.run(['systemctl', 'start', 'gx-tunnel'], check=True)
-        subprocess.run(['systemctl', 'start', 'gx-webgui'], check=True)
+        subprocess.run(['systemctl', 'start', 'gx-tunnel'], check=True, capture_output=True)
+        subprocess.run(['systemctl', 'start', 'gx-webgui'], check=True, capture_output=True)
         return jsonify({'success': True, 'message': 'Services started successfully'})
     except subprocess.CalledProcessError as e:
         return jsonify({'success': False, 'message': f'Failed to start services: {str(e)}'})
 
 if __name__ == '__main__':
+    print("🚀 Starting GX Tunnel Web GUI on port 8081...")
     app.run(host='0.0.0.0', port=8081, debug=False)
