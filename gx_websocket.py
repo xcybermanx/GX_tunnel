@@ -9,7 +9,6 @@ import logging
 from datetime import datetime
 import os
 import json
-import hashlib
 import sqlite3
 from typing import Dict, List, Optional
 
@@ -29,6 +28,7 @@ RESPONSE = 'HTTP/1.1 101 Switching Protocols\r\n\r\nContent-Length: 104857600000
 USER_DB = "/opt/gx_tunnel/users.json"
 STATS_DB = "/opt/gx_tunnel/statistics.db"
 LOG_DIR = "/var/log/gx_tunnel"
+CONFIG_FILE = "/opt/gx_tunnel/config.json"
 
 # Statistics
 connection_stats = {
@@ -91,6 +91,50 @@ def setup_logging():
     logger.addHandler(file_handler)
     logger.addHandler(console_handler)
 
+class ConfigManager:
+    def __init__(self, config_file):
+        self.config_file = config_file
+        self.load_config()
+    
+    def load_config(self):
+        default_config = {
+            "server": {
+                "host": "0.0.0.0",
+                "port": 8080,
+                "webgui_port": 8081,
+                "domain": "",
+                "ssl_enabled": False
+            },
+            "security": {
+                "fail2ban_enabled": True,
+                "max_login_attempts": 3,
+                "ban_time": 3600
+            },
+            "users": {
+                "default_expiry_days": 30,
+                "max_connections_per_user": 3,
+                "max_users": 100
+            }
+        }
+        
+        try:
+            with open(self.config_file, 'r') as f:
+                self.config = json.load(f)
+        except:
+            self.config = default_config
+            self.save_config()
+    
+    def save_config(self):
+        with open(self.config_file, 'w') as f:
+            json.dump(self.config, f, indent=2)
+    
+    def get(self, key, default=None):
+        keys = key.split('.')
+        value = self.config
+        for k in keys:
+            value = value.get(k, {})
+        return value if value != {} else default
+
 class StatisticsManager:
     def __init__(self, db_path):
         self.db_path = db_path
@@ -107,7 +151,8 @@ class StatisticsManager:
                 connections INTEGER DEFAULT 0,
                 download_bytes INTEGER DEFAULT 0,
                 upload_bytes INTEGER DEFAULT 0,
-                last_connection TEXT
+                last_connection TEXT,
+                total_duration INTEGER DEFAULT 0
             )
         ''')
         
@@ -129,26 +174,28 @@ class StatisticsManager:
                 end_time TEXT,
                 duration INTEGER,
                 download_bytes INTEGER,
-                upload_bytes INTEGER
+                upload_bytes INTEGER,
+                status TEXT DEFAULT 'completed'
             )
         ''')
         
         conn.commit()
         conn.close()
     
-    def log_connection(self, username, client_ip, duration, download_bytes, upload_bytes):
+    def log_connection(self, username, client_ip, duration, download_bytes, upload_bytes, status='completed'):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         # Update user stats
         cursor.execute('''
             INSERT OR REPLACE INTO user_stats 
-            (username, connections, download_bytes, upload_bytes, last_connection)
+            (username, connections, download_bytes, upload_bytes, last_connection, total_duration)
             VALUES (?, COALESCE((SELECT connections FROM user_stats WHERE username = ?), 0) + 1,
                    COALESCE((SELECT download_bytes FROM user_stats WHERE username = ?), 0) + ?,
                    COALESCE((SELECT upload_bytes FROM user_stats WHERE username = ?), 0) + ?,
-                   datetime('now'))
-        ''', (username, username, username, download_bytes, username, upload_bytes))
+                   datetime('now'),
+                   COALESCE((SELECT total_duration FROM user_stats WHERE username = ?), 0) + ?)
+        ''', (username, username, username, download_bytes, username, upload_bytes, username, duration))
         
         # Update global stats
         cursor.execute('''
@@ -161,12 +208,22 @@ class StatisticsManager:
             VALUES ('total_upload', COALESCE((SELECT value FROM global_stats WHERE key = 'total_upload'), 0) + ?)
         ''', (upload_bytes,))
         
+        cursor.execute('''
+            INSERT OR REPLACE INTO global_stats (key, value)
+            VALUES ('total_connections', COALESCE((SELECT value FROM global_stats WHERE key = 'total_connections'), 0) + 1)
+        ''')
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO global_stats (key, value)
+            VALUES ('total_duration', COALESCE((SELECT value FROM global_stats WHERE key = 'total_duration'), 0) + ?)
+        ''', (duration,))
+        
         # Log connection
         cursor.execute('''
             INSERT INTO connection_log 
-            (username, client_ip, start_time, end_time, duration, download_bytes, upload_bytes)
-            VALUES (?, ?, datetime('now', ?), datetime('now'), ?, ?, ?)
-        ''', (username, client_ip, f'-{duration} seconds', duration, download_bytes, upload_bytes))
+            (username, client_ip, start_time, end_time, duration, download_bytes, upload_bytes, status)
+            VALUES (?, ?, datetime('now', ?), datetime('now'), ?, ?, ?, ?)
+        ''', (username, client_ip, f'-{duration} seconds', duration, download_bytes, upload_bytes, status))
         
         conn.commit()
         conn.close()
@@ -176,7 +233,7 @@ class StatisticsManager:
         cursor = conn.cursor()
         
         cursor.execute('''
-            SELECT connections, download_bytes, upload_bytes, last_connection
+            SELECT connections, download_bytes, upload_bytes, last_connection, total_duration
             FROM user_stats WHERE username = ?
         ''', (username,))
         
@@ -188,7 +245,8 @@ class StatisticsManager:
                 'connections': result[0],
                 'download_bytes': result[1],
                 'upload_bytes': result[2],
-                'last_connection': result[3]
+                'last_connection': result[3],
+                'total_duration': result[4]
             }
         return None
     
@@ -203,6 +261,36 @@ class StatisticsManager:
         
         conn.close()
         return stats
+    
+    def get_active_users_count(self):
+        """Get count of users with active connections"""
+        return len([u for u in user_connections.values() if u > 0])
+    
+    def get_connection_history(self, limit=50):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT username, client_ip, start_time, duration, download_bytes, upload_bytes, status
+            FROM connection_log 
+            ORDER BY id DESC 
+            LIMIT ?
+        ''', (limit,))
+        
+        connections = []
+        for row in cursor.fetchall():
+            connections.append({
+                'username': row[0],
+                'client_ip': row[1],
+                'start_time': row[2],
+                'duration': row[3],
+                'download_bytes': row[4],
+                'upload_bytes': row[5],
+                'status': row[6]
+            })
+        
+        conn.close()
+        return connections
 
 class UserManager:
     def __init__(self, db_path):
@@ -230,15 +318,18 @@ class UserManager:
     def validate_user(self, username, password):
         for user in self.users:
             if user['username'] == username:
-                # Check if account is expired
-                if 'expires' in user and user['expires']:
-                    expiry_date = datetime.strptime(user['expires'], '%Y-%m-%d')
-                    if datetime.now() > expiry_date:
-                        return False, "Account expired"
-                
                 # Check if account is active
                 if not user.get('active', True):
                     return False, "Account disabled"
+                
+                # Check if account is expired
+                if 'expires' in user and user['expires']:
+                    try:
+                        expiry_date = datetime.strptime(user['expires'], '%Y-%m-%d')
+                        if datetime.now() > expiry_date:
+                            return False, "Account expired"
+                    except:
+                        pass  # Invalid date format, ignore expiration
                 
                 # Check concurrent connections
                 max_conn = user.get('max_connections', self.settings.get('max_connections_per_user', 3))
@@ -246,35 +337,50 @@ class UserManager:
                 if current_conn >= max_conn:
                     return False, f"Maximum connections ({max_conn}) reached"
                 
-                # Simple password validation
+                # Password validation
                 if user['password'] == password:
                     return True, "Valid user"
                 else:
                     return False, "Invalid password"
+        
         return False, "User not found"
     
-    def add_user(self, username, password, expires=None, max_connections=3):
+    def add_user(self, username, password, expires=None, max_connections=3, active=True):
         user_data = {
             'username': username,
             'password': password,
-            'created': datetime.now().strftime('%Y-%m-%d'),
+            'created': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'expires': expires,
             'max_connections': max_connections,
-            'active': True
+            'active': active,
+            'last_modified': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         }
         self.users.append(user_data)
         self.save_users()
+        return True, "User added successfully"
     
     def delete_user(self, username):
         self.users = [u for u in self.users if u['username'] != username]
         self.save_users()
+        return True, "User deleted successfully"
     
     def update_user(self, username, **kwargs):
         for user in self.users:
             if user['username'] == username:
                 user.update(kwargs)
+                user['last_modified'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 break
         self.save_users()
+        return True, "User updated successfully"
+    
+    def get_user(self, username):
+        for user in self.users:
+            if user['username'] == username:
+                return user
+        return None
+    
+    def get_all_users(self):
+        return self.users.copy()
 
 class Server(threading.Thread):
     def __init__(self, host, port):
@@ -286,6 +392,7 @@ class Server(threading.Thread):
         self.threadsLock = threading.Lock()
         self.logLock = threading.Lock()
         self.connection_events = []
+        self.config_manager = ConfigManager(CONFIG_FILE)
         self.user_manager = UserManager(USER_DB)
         self.stats_manager = StatisticsManager(STATS_DB)
 
@@ -303,6 +410,7 @@ class Server(threading.Thread):
             logging.info(f"🚀 {Colors.GREEN}GX Tunnel started on {self.host}:{self.port}{Colors.RESET}")
             logging.info(f"📊 {Colors.CYAN}Real-time logging: Active{Colors.RESET}")
             logging.info(f"👥 {Colors.YELLOW}User authentication: Enabled{Colors.RESET}")
+            logging.info(f"🔧 {Colors.MAGENTA}Configuration loaded successfully{Colors.RESET}")
 
             while self.running:
                 try:
@@ -343,7 +451,8 @@ class Server(threading.Thread):
                     'time': datetime.now().strftime('%H:%M:%S'),
                     'client': conn.log.split(' ')[1],
                     'target': conn.log.split('CONNECT ')[1] if 'CONNECT' in conn.log else 'Unknown',
-                    'type': 'NEW'
+                    'type': 'NEW',
+                    'username': getattr(conn, 'username', 'Unknown')
                 }
                 self.connection_events.append(event)
                 
@@ -363,7 +472,8 @@ class Server(threading.Thread):
                     'client': conn.log.split(' ')[1],
                     'target': conn.log.split('CONNECT ')[1] if 'CONNECT' in conn.log else 'Unknown',
                     'type': 'CLOSE',
-                    'duration': getattr(conn, 'connection_duration', 0)
+                    'duration': getattr(conn, 'connection_duration', 0),
+                    'username': getattr(conn, 'username', 'Unknown')
                 }
                 self.connection_events.append(event)
                 
@@ -387,13 +497,18 @@ class Server(threading.Thread):
         return {
             'active_connections': len(self.threads),
             'total_connections': connection_stats['total_connections'],
+            'active_users': self.stats_manager.get_active_users_count(),
             'listening_port': self.port,
             'server_uptime': uptime,
-            'connections_per_minute': connection_stats['total_connections'] / (uptime / 60) if uptime > 0 else 0
+            'connections_per_minute': connection_stats['total_connections'] / (uptime / 60) if uptime > 0 else 0,
+            'users_count': len(self.user_manager.get_all_users())
         }
     
     def get_recent_events(self, count=10):
         return self.connection_events[-count:]
+    
+    def get_connection_history(self, limit=20):
+        return self.stats_manager.get_connection_history(limit)
 
 class ConnectionHandler(threading.Thread):
     def __init__(self, socClient, server, addr):
@@ -410,6 +525,7 @@ class ConnectionHandler(threading.Thread):
         self.client_ip = addr[0]
         self.download_bytes = 0
         self.upload_bytes = 0
+        self.authenticated = False
 
     def close(self):
         try:
@@ -447,9 +563,14 @@ class ConnectionHandler(threading.Thread):
                 if not valid:
                     self.client.send(b'HTTP/1.1 401 Unauthorized\r\n\r\n' + message.encode())
                     logging.warning(f"🔒 {Colors.RED}Authentication failed for {username}: {message}{Colors.RESET}")
+                    # Log failed attempt
+                    self.server.stats_manager.log_connection(
+                        username, self.client_ip, 0, 0, 0, 'authentication_failed'
+                    )
                     return
                 
                 self.username = username
+                self.authenticated = True
                 
                 # Track user connection
                 if username not in user_connections:
@@ -476,23 +597,29 @@ class ConnectionHandler(threading.Thread):
         except Exception as e:
             self.log += f' - error: {str(e)}'
             logging.error(f"💥 {Colors.RED}Connection error: {self.log}{Colors.RESET}")
+            if self.authenticated and self.username:
+                self.server.stats_manager.log_connection(
+                    self.username, self.client_ip, 0, 0, 0, 'connection_error'
+                )
         finally:
             self.connection_duration = time.time() - self.start_time
             
             # Update statistics
-            if self.username:
+            if self.authenticated and self.username:
                 # Remove from active connections
                 if self.username in user_connections:
                     user_connections[self.username] = max(0, user_connections[self.username] - 1)
                 
-                # Log statistics
-                self.server.stats_manager.log_connection(
-                    self.username, 
-                    self.client_ip, 
-                    int(self.connection_duration),
-                    self.download_bytes,
-                    self.upload_bytes
-                )
+                # Log statistics only for successful connections
+                if self.connection_duration > 1:  # Only log if connection lasted more than 1 second
+                    self.server.stats_manager.log_connection(
+                        self.username, 
+                        self.client_ip, 
+                        int(self.connection_duration),
+                        self.download_bytes,
+                        self.upload_bytes,
+                        'completed'
+                    )
                 
                 logging.info(f"🔌 {Colors.CYAN}Connection closed: {self.username} from {self.log} - Duration: {self.connection_duration:.2f}s - Data: ↓{self.download_bytes} ↑{self.upload_bytes} bytes{Colors.RESET}")
             else:
@@ -535,6 +662,10 @@ class ConnectionHandler(threading.Thread):
             
         except Exception as e:
             logging.error(f"❌ {Colors.RED}Failed to connect to target {host.decode('utf-8')}: {e}{Colors.RESET}")
+            if self.authenticated and self.username:
+                self.server.stats_manager.log_connection(
+                    self.username, self.client_ip, 0, 0, 0, 'target_connection_failed'
+                )
             raise
 
     def method_CONNECT(self, path):
@@ -554,6 +685,10 @@ class ConnectionHandler(threading.Thread):
         except Exception as e:
             logging.error(f"💥 {Colors.RED}Tunnel setup failed: {e}{Colors.RESET}")
             self.client.send(b'HTTP/1.1 500 TunnelError\r\n\r\n')
+            if self.authenticated and self.username:
+                self.server.stats_manager.log_connection(
+                    self.username, self.client_ip, 0, 0, 0, 'tunnel_setup_failed'
+                )
 
     def doCONNECT(self):
         socs = [self.client, self.target]
@@ -613,6 +748,8 @@ def print_usage():
   {Colors.GREEN}✅ Account expiration support{Colors.RESET}
   {Colors.GREEN}✅ Connection statistics{Colors.RESET}
   {Colors.GREEN}✅ Real-time monitoring{Colors.RESET}
+  {Colors.GREEN}✅ Connection limits{Colors.RESET}
+  {Colors.GREEN}✅ Active user tracking{Colors.RESET}
     ''')
 
 def parse_args(argv):
@@ -644,6 +781,7 @@ def show_banner():
 ║         {Colors.MAGENTA}🚀 UNLIMITED BANDWIDTH{Colors.CYAN}        ║
 ║         {Colors.GREEN}✅ Web GUI Admin{Colors.CYAN}               ║
 ║         {Colors.YELLOW}🌐 Real-time Stats{Colors.CYAN}            ║
+║         {Colors.BLUE}🔧 Enhanced Features{Colors.CYAN}           ║
 ╚═══════════════════════════════════════╝{Colors.RESET}
     '''
     print(banner)
@@ -655,9 +793,11 @@ def display_stats(server):
     print(f"\n{Colors.CYAN}{Colors.BOLD}📊 REAL-TIME STATISTICS:{Colors.RESET}")
     print(f"{Colors.WHITE}╔═══════════════════════════════════════╗{Colors.RESET}")
     print(f"{Colors.WHITE}║ {Colors.GREEN}🟢 Active Connections: {Colors.CYAN}{stats['active_connections']:>15}{Colors.WHITE} ║{Colors.RESET}")
-    print(f"{Colors.WHITE}║ {Colors.YELLOW}📈 Total Connections: {Colors.CYAN}{stats['total_connections']:>15}{Colors.WHITE} ║{Colors.RESET}")
-    print(f"{Colors.WHITE}║ {Colors.BLUE}⏱️  Server Uptime: {Colors.CYAN}{stats['server_uptime']:>18.1f}s{Colors.WHITE} ║{Colors.RESET}")
-    print(f"{Colors.WHITE}║ {Colors.MAGENTA}🚀 Connections/Min: {Colors.CYAN}{stats['connections_per_minute']:>16.1f}{Colors.WHITE} ║{Colors.RESET}")
+    print(f"{Colors.WHITE}║ {Colors.YELLOW}👥 Active Users: {Colors.CYAN}{stats['active_users']:>20}{Colors.WHITE} ║{Colors.RESET}")
+    print(f"{Colors.WHITE}║ {Colors.BLUE}📈 Total Connections: {Colors.CYAN}{stats['total_connections']:>15}{Colors.WHITE} ║{Colors.RESET}")
+    print(f"{Colors.WHITE}║ {Colors.MAGENTA}👤 Total Users: {Colors.CYAN}{stats['users_count']:>22}{Colors.WHITE} ║{Colors.RESET}")
+    print(f"{Colors.WHITE}║ {Colors.CYAN}⏱️  Server Uptime: {Colors.CYAN}{stats['server_uptime']:>18.1f}s{Colors.WHITE} ║{Colors.RESET}")
+    print(f"{Colors.WHITE}║ {Colors.GREEN}🚀 Connections/Min: {Colors.CYAN}{stats['connections_per_minute']:>16.1f}{Colors.WHITE} ║{Colors.RESET}")
     print(f"{Colors.WHITE}╚═══════════════════════════════════════╝{Colors.RESET}")
     
     if recent_events:
@@ -666,7 +806,8 @@ def display_stats(server):
             icon = "🟢" if event['type'] == 'NEW' else "🔴"
             color = Colors.GREEN if event['type'] == 'NEW' else Colors.RED
             duration = f" - {event['duration']:.1f}s" if 'duration' in event else ""
-            print(f"  {icon} {color}{event['time']} - {event['client']} → {event['target']}{duration}{Colors.RESET}")
+            username = f" ({event['username']})" if event.get('username') and event['username'] != 'Unknown' else ""
+            print(f"  {icon} {color}{event['time']} - {event['client']} → {event['target']}{username}{duration}{Colors.RESET}")
 
 def main(host=LISTENING_ADDR, port=LISTENING_PORT):
     # Setup logging first
@@ -678,6 +819,7 @@ def main(host=LISTENING_ADDR, port=LISTENING_PORT):
     print(f"{Colors.YELLOW}📍 {Colors.WHITE}Listening on: {Colors.CYAN}{LISTENING_ADDR}:{LISTENING_PORT}{Colors.RESET}")
     print(f"{Colors.YELLOW}👥 {Colors.WHITE}User authentication: {Colors.GREEN}Enabled{Colors.RESET}")
     print(f"{Colors.YELLOW}📊 {Colors.WHITE}Logging to: {Colors.CYAN}{LOG_DIR}/websocket.log{Colors.RESET}")
+    print(f"{Colors.YELLOW}🔧 {Colors.WHITE}Configuration: {Colors.GREEN}Loaded{Colors.RESET}")
     print(f"{Colors.YELLOW}🚀 {Colors.WHITE}Starting server...{Colors.RESET}\n")
     
     server = Server(LISTENING_ADDR, LISTENING_PORT)
@@ -698,7 +840,7 @@ def main(host=LISTENING_ADDR, port=LISTENING_PORT):
                 
                 # Log stats to file
                 stats = server.get_stats()
-                logging.info(f"📈 Stats - Active: {stats['active_connections']}, Total: {stats['total_connections']}, Rate: {stats['connections_per_minute']:.1f}/min")
+                logging.info(f"📈 Stats - Active: {stats['active_connections']}, Users: {stats['active_users']}, Total: {stats['total_connections']}, Rate: {stats['connections_per_minute']:.1f}/min")
                 
     except KeyboardInterrupt:
         print(f'\n\n{Colors.YELLOW}🛑 Stopping server...{Colors.RESET}')
