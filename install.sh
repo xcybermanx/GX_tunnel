@@ -21,6 +21,7 @@ LOG_DIR="/var/log/gx_tunnel"
 SERVICE_NAME="gx-tunnel"
 WEBGUI_SERVICE="gx-webgui"
 BACKUP_DIR="$INSTALL_DIR/backups"
+CONFIG_FILE="$INSTALL_DIR/config.json"
 
 # Beautiful banner function
 display_banner() {
@@ -34,6 +35,8 @@ display_banner() {
     echo -e "│    ${CYAN}🔒 Fail2Ban Protection${BLUE}  ${PURPLE}⚡ Unlimited Bandwidth${BLUE}       │"
     echo -e "│    ${WHITE}📊 Auto Backup${BLUE}         ${GREEN}🔄 Auto Update${BLUE}              │"
     echo -e "│    ${YELLOW}🔧 Multi-Port${BLUE}         ${RED}🛡️  DDoS Protection${BLUE}           │"
+    echo -e "│    ${CYAN}🌍 Domain Support${BLUE}       ${PURPLE}📱 Mobile App${BLUE}               │"
+    echo -e "│    ${GREEN}🔔 Notifications${BLUE}       ${YELLOW}📈 Analytics${BLUE}                │"
     echo -e "│                                                         │"
     echo -e "│              ${WHITE}Created by: Jawad${BLUE}                         │"
     echo -e "│           ${YELLOW}Telegram: @jawadx${BLUE}                           │"
@@ -77,13 +80,6 @@ log_warning() {
 
 log_error() {
     echo -e "${RED}❌ [ERROR]${NC} ${WHITE}$1${NC}"
-}
-
-# Step indicator function
-show_step() {
-    local step_num="$1"
-    local step_name="$2"
-    echo -e "${PURPLE}✨ [Step $step_num] ${CYAN}$step_name${NC}"
 }
 
 # Check root with pretty output
@@ -164,7 +160,11 @@ install_dependencies() {
         htop \
         iftop \
         nethogs \
-        iptables-persistent
+        iptables-persistent \
+        git \
+        unzip \
+        certbot \
+        python3-certbot-nginx
 
     show_success_banner "All system dependencies installed"
     echo
@@ -177,8 +177,8 @@ install_python_packages() {
     log_info "Upgrading pip..."
     pip3 install --upgrade pip --quiet
     
-    log_info "Installing Flask, Flask-CORS, and Psutil..."
-    pip3 install flask flask-cors psutil requests --quiet
+    log_info "Installing Python packages..."
+    pip3 install flask flask-cors psutil requests python-socketio eventlet cryptography --quiet
     
     show_success_banner "Python packages installed successfully"
     echo
@@ -196,6 +196,12 @@ create_directories() {
     
     log_info "Creating backup directory..."
     mkdir -p "$BACKUP_DIR"
+    
+    log_info "Creating SSL directory..."
+    mkdir -p "$INSTALL_DIR/ssl"
+    
+    log_info "Creating themes directory..."
+    mkdir -p "$INSTALL_DIR/themes"
     
     chmod 755 "$INSTALL_DIR"
     chmod 755 "$LOG_DIR"
@@ -260,19 +266,25 @@ copy_local_files() {
         "auto_backup": true,
         "auto_update": false,
         "max_connections_per_ip": 10,
-        "enable_ddos_protection": true
+        "enable_ddos_protection": true,
+        "enable_notifications": true,
+        "theme": "dark",
+        "language": "en"
     }
 }
 EOF
 
-    log_info "Creating statistics database..."
+    log_info "Creating enhanced statistics database..."
     cat > "$INSTALL_DIR/create_tables.sql" << 'EOF'
 CREATE TABLE IF NOT EXISTS user_stats (
     username TEXT PRIMARY KEY,
     connections INTEGER DEFAULT 0,
     download_bytes INTEGER DEFAULT 0,
     upload_bytes INTEGER DEFAULT 0,
-    last_connection TEXT
+    last_connection TEXT,
+    total_duration INTEGER DEFAULT 0,
+    country TEXT,
+    device_type TEXT
 );
 
 CREATE TABLE IF NOT EXISTS global_stats (
@@ -287,7 +299,10 @@ CREATE TABLE IF NOT EXISTS connection_log (
     start_time TEXT,
     duration INTEGER,
     download_bytes INTEGER,
-    upload_bytes INTEGER
+    upload_bytes INTEGER,
+    status TEXT,
+    country TEXT,
+    user_agent TEXT
 );
 
 CREATE TABLE IF NOT EXISTS security_log (
@@ -296,40 +311,98 @@ CREATE TABLE IF NOT EXISTS security_log (
     client_ip TEXT,
     username TEXT,
     description TEXT,
-    timestamp TEXT
+    timestamp TEXT,
+    severity TEXT
+);
+
+CREATE TABLE IF NOT EXISTS notification_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT,
+    title TEXT,
+    message TEXT,
+    timestamp TEXT,
+    read_status INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS bandwidth_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT,
+    download_bytes INTEGER DEFAULT 0,
+    upload_bytes INTEGER DEFAULT 0
 );
 EOF
 
     sqlite3 "$INSTALL_DIR/statistics.db" < "$INSTALL_DIR/create_tables.sql"
     rm -f "$INSTALL_DIR/create_tables.sql"
     
+    # Create enhanced configuration
+    create_enhanced_config
+    
     show_success_banner "All application files copied successfully"
     echo
 }
 
-# Create default config if not provided
-create_default_config() {
+# Create enhanced configuration
+create_enhanced_config() {
+    log_info "Creating enhanced configuration..."
     cat > "$INSTALL_DIR/config.json" << 'EOF'
 {
     "server": {
         "host": "0.0.0.0",
         "port": 8080,
-        "webgui_port": 8081
+        "webgui_port": 8081,
+        "domain": "",
+        "ssl_enabled": false,
+        "ssl_cert": "",
+        "ssl_key": ""
     },
     "security": {
         "fail2ban_enabled": true,
         "max_login_attempts": 3,
-        "ban_time": 3600
+        "ban_time": 3600,
+        "session_timeout": 3600,
+        "enable_ddos_protection": true,
+        "max_connections_per_ip": 10,
+        "allowed_countries": [],
+        "blocked_ips": []
     },
     "users": {
         "default_expiry_days": 30,
         "max_connections_per_user": 3,
-        "max_users": 100
+        "max_users": 100,
+        "password_policy": {
+            "min_length": 6,
+            "require_numbers": true,
+            "require_special_chars": false
+        }
     },
-    "logging": {
-        "level": "INFO",
-        "max_size": "10MB",
-        "backup_count": 5
+    "backup": {
+        "auto_backup": true,
+        "backup_interval_hours": 24,
+        "max_backups": 7,
+        "backup_to_cloud": false
+    },
+    "notifications": {
+        "enabled": true,
+        "email_alerts": false,
+        "telegram_alerts": false,
+        "discord_alerts": false,
+        "alert_on_new_connection": true,
+        "alert_on_failed_login": true
+    },
+    "appearance": {
+        "theme": "dark",
+        "language": "en",
+        "custom_css": "",
+        "logo_url": ""
+    },
+    "advanced": {
+        "log_level": "INFO",
+        "max_log_size": "10MB",
+        "enable_geoip": true,
+        "enable_analytics": true,
+        "auto_optimize": true,
+        "performance_mode": false
     }
 }
 EOF
@@ -363,6 +436,10 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=$INSTALL_DIR $LOG_DIR
 
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -391,18 +468,42 @@ ProtectSystem=strict
 ProtectHome=yes
 ReadWritePaths=$INSTALL_DIR $LOG_DIR
 
+# Environment
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # Create monitoring service
+    log_info "Creating monitoring service..."
+    cat > /etc/systemd/system/gx-monitor.service << EOF
+[Unit]
+Description=GX Tunnel Monitor Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=$INSTALL_DIR
+ExecStart=/usr/local/bin/gx-tunnel monitor --daemon
+Restart=always
+RestartSec=10
+StandardOutput=append:$LOG_DIR/monitor.log
+StandardError=append:$LOG_DIR/monitor.log
+
 [Install]
 WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable "$SERVICE_NAME" "$WEBGUI_SERVICE"
+    systemctl enable "$SERVICE_NAME" "$WEBGUI_SERVICE" gx-monitor
     
     show_success_banner "Systemd services created and configured"
     echo
 }
 
-# Setup firewall with DDoS protection (non-interactive)
+# Setup firewall with enhanced DDoS protection
 setup_firewall() {
     show_progress_banner "8" "Configuring Firewall & DDoS Protection"
     
@@ -416,37 +517,43 @@ setup_firewall() {
     ufw allow 80/tcp comment 'HTTP' > /dev/null 2>&1
     ufw allow 443/tcp comment 'HTTPS' > /dev/null 2>&1
     
-    # Additional security rules
+    # Enhanced security rules
     ufw limit 22/tcp comment 'SSH Rate Limit' > /dev/null 2>&1
     ufw limit 8081/tcp comment 'Web GUI Rate Limit' > /dev/null 2>&1
+    ufw limit 8080/tcp comment 'Tunnel Rate Limit' > /dev/null 2>&1
     
-    log_info "Setting up basic DDoS protection..."
-    # Basic rate limiting with iptables
+    log_info "Setting up enhanced DDoS protection..."
+    # Enhanced rate limiting with iptables
     iptables -N GX_DDOS 2>/dev/null || true
     iptables -F GX_DDOS
     
-    # Rate limiting rules for tunnel port
+    # Enhanced rate limiting rules
+    iptables -A GX_DDOS -p tcp --dport 8080 -m connlimit --connlimit-above 50 -j DROP
     iptables -A GX_DDOS -p tcp --dport 8080 -m limit --limit 60/minute --limit-burst 100 -j ACCEPT
     iptables -A GX_DDOS -p tcp --dport 8080 -j DROP
     
-    # Rate limiting rules for web GUI port
+    iptables -A GX_DDOS -p tcp --dport 8081 -m connlimit --connlimit-above 20 -j DROP
     iptables -A GX_DDOS -p tcp --dport 8081 -m limit --limit 30/minute --limit-burst 50 -j ACCEPT
     iptables -A GX_DDOS -p tcp --dport 8081 -j DROP
+    
+    # SYN flood protection
+    iptables -A GX_DDOS -p tcp --syn -m limit --limit 1/s --limit-burst 3 -j ACCEPT
+    iptables -A GX_DDOS -p tcp --syn -j DROP
     
     # Apply to INPUT chain
     iptables -D INPUT -p tcp -m multiport --dports 8080,8081 -j GX_DDOS 2>/dev/null || true
     iptables -A INPUT -p tcp -m multiport --dports 8080,8081 -j GX_DDOS
     
-    # Save iptables rules non-interactively
+    # Save iptables rules
     log_info "Saving iptables rules..."
     mkdir -p /etc/iptables
     iptables-save > /etc/iptables/rules.v4
     
-    show_success_banner "Firewall and DDoS protection configured"
+    show_success_banner "Enhanced firewall and DDoS protection configured"
     echo
 }
 
-# Setup fail2ban with custom jails
+# Setup enhanced fail2ban with custom jails
 setup_fail2ban() {
     show_progress_banner "9" "Setting Up Fail2Ban Protection"
     
@@ -460,6 +567,7 @@ logpath = /var/log/auth.log
 maxretry = 3
 bantime = 3600
 findtime = 600
+ignoreip = 127.0.0.1/8
 EOF
 
     log_info "Configuring GX Tunnel protection..."
@@ -472,6 +580,7 @@ logpath = $LOG_DIR/websocket.log
 maxretry = 5
 bantime = 3600
 findtime = 600
+ignoreip = 127.0.0.1/8
 
 [gx-webgui]
 enabled = true
@@ -481,13 +590,25 @@ logpath = $LOG_DIR/webgui.log
 maxretry = 3
 bantime = 7200
 findtime = 600
+ignoreip = 127.0.0.1/8
+
+[gx-ddos]
+enabled = true
+port = 8080,8081
+filter = gx-ddos
+logpath = $LOG_DIR/websocket.log
+maxretry = 10
+bantime = 86400
+findtime = 300
+ignoreip = 127.0.0.1/8
 EOF
 
-    # Create custom filters
+    # Create enhanced filters
     cat > /etc/fail2ban/filter.d/gx-tunnel.conf << 'EOF'
 [Definition]
 failregex = ^.*ERROR.*Authentication failed for user: <HOST>.*$
             ^.*WARNING.*Multiple connection attempts from <HOST>.*$
+            ^.*ERROR.*Invalid credentials from <HOST>.*$
 ignoreregex =
 EOF
 
@@ -495,11 +616,20 @@ EOF
 [Definition]
 failregex = ^.*Invalid login attempt from <HOST>.*$
             ^.*Failed admin login from <HOST>.*$
+            ^.*ERROR.*Login failed for user .* from <HOST>.*$
+ignoreregex =
+EOF
+
+    cat > /etc/fail2ban/filter.d/gx-ddos.conf << 'EOF'
+[Definition]
+failregex = ^.*WARNING.*Multiple rapid connections from <HOST>.*$
+            ^.*ERROR.*Connection limit exceeded from <HOST>.*$
+            ^.*WARNING.*Possible DDoS attack from <HOST>.*$
 ignoreregex =
 EOF
 
     systemctl restart fail2ban
-    show_success_banner "Fail2Ban protection activated with custom jails"
+    show_success_banner "Enhanced Fail2Ban protection activated"
     echo
 }
 
@@ -511,66 +641,202 @@ setup_log_rotation() {
 $LOG_DIR/*.log {
     daily
     missingok
-    rotate 7
+    rotate 30
     compress
     delaycompress
     notifempty
     copytruncate
+    maxsize 100M
 }
 EOF
 
-    show_success_banner "Log rotation configured"
+    show_success_banner "Enhanced log rotation configured"
     echo
 }
 
-# Create backup script
+# Create enhanced backup script
 create_backup_script() {
-    log_info "Creating backup script..."
+    log_info "Creating enhanced backup script..."
     cat > "$INSTALL_DIR/backup.sh" << 'EOF'
 #!/bin/bash
+
+# GX Tunnel Backup Script
+# Created by Jawad - Telegram: @jawadx
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
 BACKUP_DIR="/opt/gx_tunnel/backups"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 BACKUP_FILE="$BACKUP_DIR/backup_$TIMESTAMP.tar.gz"
+LOG_FILE="/var/log/gx_tunnel/backup.log"
 
-echo "Creating backup: $BACKUP_FILE"
-tar -czf "$BACKUP_FILE" -C /opt/gx_tunnel users.json statistics.db config.json 2>/dev/null
+# Log function
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
 
-# Remove old backups (keep last 7)
-ls -t $BACKUP_DIR/backup_*.tar.gz 2>/dev/null | tail -n +8 | xargs -r rm
+echo "🔧 Starting GX Tunnel Backup..."
+log "Starting backup process"
 
-echo "Backup completed: $BACKUP_FILE"
+# Create backup
+echo "📦 Creating backup archive..."
+tar -czf "$BACKUP_FILE" \
+    -C /opt/gx_tunnel \
+    users.json \
+    statistics.db \
+    config.json \
+    ssl/ \
+    themes/ 2>/dev/null
+
+if [ $? -eq 0 ]; then
+    echo -e "${GREEN}✅ Backup created: $BACKUP_FILE${NC}"
+    log "Backup created successfully: $BACKUP_FILE"
+    
+    # Backup size
+    BACKUP_SIZE=$(du -h "$BACKUP_FILE" | cut -f1)
+    echo "💾 Backup size: $BACKUP_SIZE"
+    log "Backup size: $BACKUP_SIZE"
+    
+    # Remove old backups (keep last 10)
+    OLD_BACKUPS=$(ls -t $BACKUP_DIR/backup_*.tar.gz 2>/dev/null | tail -n +11)
+    if [ -n "$OLD_BACKUPS" ]; then
+        echo "🗑️  Cleaning old backups..."
+        echo "$OLD_BACKUPS" | xargs -r rm
+        log "Removed old backups"
+    fi
+    
+    # List current backups
+    CURRENT_BACKUPS=$(ls -1 $BACKUP_DIR/backup_*.tar.gz 2>/dev/null | wc -l)
+    echo "📊 Total backups: $CURRENT_BACKUPS"
+    log "Total backups: $CURRENT_BACKUPS"
+    
+    echo -e "${GREEN}🎉 Backup completed successfully!${NC}"
+else
+    echo -e "${RED}❌ Backup creation failed${NC}"
+    log "Backup creation failed"
+    exit 1
+fi
 EOF
 
     chmod +x "$INSTALL_DIR/backup.sh"
 }
 
-# Create update script
+# Create enhanced update script
 create_update_script() {
-    log_info "Creating update script..."
+    log_info "Creating enhanced update script..."
     cat > "$INSTALL_DIR/update.sh" << 'EOF'
 #!/bin/bash
-echo "Checking for GX Tunnel updates..."
-cd /opt/gx_tunnel
+
+# GX Tunnel Update Script
+# Created by Jawad - Telegram: @jawadx
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+INSTALL_DIR="/opt/gx_tunnel"
+LOG_FILE="/var/log/gx_tunnel/update.log"
+BACKUP_SCRIPT="$INSTALL_DIR/backup.sh"
+
+# Log function
+log() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+}
+
+echo "🔄 Starting GX Tunnel Update..."
+log "Starting update process"
 
 # Backup before update
-./backup.sh
+echo "💾 Creating backup before update..."
+if [ -f "$BACKUP_SCRIPT" ]; then
+    bash "$BACKUP_SCRIPT"
+else
+    echo -e "${YELLOW}⚠️  Backup script not found, skipping backup${NC}"
+    log "Backup script not found, skipping backup"
+fi
 
 # Get the latest version from GitHub
-wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx_websocket.py -O gx_websocket.py.new
-wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/webgui.py -O webgui.py.new
-wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx_manager.sh -O /usr/local/bin/gx-tunnel.new
+echo "📥 Downloading updates..."
+cd "$INSTALL_DIR"
 
-# Verify downloads
-if [ -s gx_websocket.py.new ] && [ -s webgui.py.new ] && [ -s /usr/local/bin/gx-tunnel.new ]; then
-    mv gx_websocket.py.new gx_websocket.py
-    mv webgui.py.new webgui.py
-    mv /usr/local/bin/gx-tunnel.new /usr/local/bin/gx-tunnel
-    chmod +x /usr/local/bin/gx-tunnel
+# Download latest files with retry logic
+download_file() {
+    local url=$1
+    local output=$2
+    local retries=3
+    local count=0
     
-    systemctl restart gx-tunnel gx-webgui
-    echo "Update completed successfully"
+    while [ $count -lt $retries ]; do
+        if wget -q "$url" -O "$output"; then
+            return 0
+        fi
+        count=$((count + 1))
+        echo "Retrying download... ($count/$retries)"
+        sleep 2
+    done
+    return 1
+}
+
+# Download updated files
+if download_file "https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx_websocket.py" "gx_websocket.py.new" &&
+   download_file "https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/webgui.py" "webgui.py.new" &&
+   download_file "https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx_manager.sh" "/usr/local/bin/gx-tunnel.new"; then
+
+    # Verify downloads
+    if [ -s "gx_websocket.py.new" ] && [ -s "webgui.py.new" ] && [ -s "/usr/local/bin/gx-tunnel.new" ]; then
+        echo "✅ Files downloaded successfully"
+        log "Update files downloaded successfully"
+        
+        # Replace old files
+        mv "gx_websocket.py.new" "gx_websocket.py"
+        mv "webgui.py.new" "webgui.py"
+        mv "/usr/local/bin/gx-tunnel.new" "/usr/local/bin/gx-tunnel"
+        chmod +x "/usr/local/bin/gx-tunnel"
+        
+        # Restart services
+        echo "🔧 Restarting services..."
+        systemctl restart gx-tunnel gx-webgui gx-monitor
+        
+        # Wait for services to start
+        sleep 5
+        
+        # Check service status
+        if systemctl is-active --quiet gx-tunnel && systemctl is-active --quiet gx-webgui; then
+            echo -e "${GREEN}🎉 Update completed successfully!${NC}"
+            log "Update completed successfully"
+            
+            # Show version information
+            echo ""
+            echo "📊 Update Summary:"
+            echo "  ✅ Services restarted"
+            echo "  ✅ Files updated"
+            echo "  ✅ Backup created"
+            echo ""
+            echo "🌐 Web GUI: http://$(hostname -I | awk '{print $1}'):8081"
+            
+        else
+            echo -e "${RED}❌ Services failed to start after update${NC}"
+            log "Services failed to start after update"
+        fi
+        
+    else
+        echo -e "${RED}❌ Downloaded files are empty or corrupted${NC}"
+        log "Downloaded files are empty or corrupted"
+        # Clean up failed downloads
+        rm -f *.new /usr/local/bin/gx-tunnel.new
+    fi
 else
-    echo "Update failed: File download error"
+    echo -e "${RED}❌ Update failed: Could not download new files${NC}"
+    log "Update failed: Could not download new files"
+    # Clean up failed downloads
     rm -f *.new /usr/local/bin/gx-tunnel.new
 fi
 EOF
@@ -578,26 +844,171 @@ EOF
     chmod +x "$INSTALL_DIR/update.sh"
 }
 
-# Fix user creation issue in management script
-fix_management_script() {
-    log_info "Fixing user creation in management script..."
+# Create monitoring and analytics script
+create_monitoring_script() {
+    log_info "Creating monitoring script..."
+    cat > "$INSTALL_DIR/monitor.py" << 'EOF'
+#!/usr/bin/python3
+import time
+import json
+import sqlite3
+import psutil
+import subprocess
+from datetime import datetime, timedelta
+import logging
+
+# Configuration
+INSTALL_DIR = "/opt/gx_tunnel"
+STATS_DB = f"{INSTALL_DIR}/statistics.db"
+LOG_FILE = "/var/log/gx_tunnel/monitor.log"
+
+# Setup logging
+logging.basicConfig(
+    filename=LOG_FILE,
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+
+class SystemMonitor:
+    def __init__(self):
+        self.conn = sqlite3.connect(STATS_DB)
+        self.setup_database()
     
-    # Create a fixed version of the management script
+    def setup_database(self):
+        cursor = self.conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS system_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                cpu_percent REAL,
+                memory_percent REAL,
+                disk_percent REAL,
+                network_sent INTEGER,
+                network_recv INTEGER,
+                active_connections INTEGER
+            )
+        ''')
+        self.conn.commit()
+    
+    def collect_system_stats(self):
+        try:
+            # CPU usage
+            cpu_percent = psutil.cpu_percent(interval=1)
+            
+            # Memory usage
+            memory = psutil.virtual_memory()
+            memory_percent = memory.percent
+            
+            # Disk usage
+            disk = psutil.disk_usage('/')
+            disk_percent = disk.percent
+            
+            # Network usage
+            net_io = psutil.net_io_counters()
+            network_sent = net_io.bytes_sent
+            network_recv = net_io.bytes_recv
+            
+            # Active connections (estimate)
+            try:
+                result = subprocess.run(['ss', '-tun'], capture_output=True, text=True)
+                active_connections = len(result.stdout.strip().split('\n')) - 1
+            except:
+                active_connections = 0
+            
+            return {
+                'timestamp': datetime.now().isoformat(),
+                'cpu_percent': cpu_percent,
+                'memory_percent': memory_percent,
+                'disk_percent': disk_percent,
+                'network_sent': network_sent,
+                'network_recv': network_recv,
+                'active_connections': active_connections
+            }
+        except Exception as e:
+            logging.error(f"Error collecting system stats: {e}")
+            return None
+    
+    def save_stats(self, stats):
+        if stats:
+            cursor = self.conn.cursor()
+            cursor.execute('''
+                INSERT INTO system_stats 
+                (timestamp, cpu_percent, memory_percent, disk_percent, network_sent, network_recv, active_connections)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                stats['timestamp'],
+                stats['cpu_percent'],
+                stats['memory_percent'],
+                stats['disk_percent'],
+                stats['network_sent'],
+                stats['network_recv'],
+                stats['active_connections']
+            ))
+            self.conn.commit()
+    
+    def cleanup_old_stats(self):
+        """Remove stats older than 30 days"""
+        try:
+            cursor = self.conn.cursor()
+            thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
+            cursor.execute('DELETE FROM system_stats WHERE timestamp < ?', (thirty_days_ago,))
+            self.conn.commit()
+            deleted_count = cursor.rowcount
+            if deleted_count > 0:
+                logging.info(f"Cleaned up {deleted_count} old system stats records")
+        except Exception as e:
+            logging.error(f"Error cleaning up old stats: {e}")
+    
+    def run(self):
+        logging.info("Starting system monitor")
+        try:
+            while True:
+                stats = self.collect_system_stats()
+                if stats:
+                    self.save_stats(stats)
+                    logging.info(f"System stats collected: CPU {stats['cpu_percent']}%, Memory {stats['memory_percent']}%")
+                
+                # Cleanup every hour
+                if datetime.now().minute == 0:
+                    self.cleanup_old_stats()
+                
+                time.sleep(60)  # Collect every minute
+                
+        except KeyboardInterrupt:
+            logging.info("System monitor stopped by user")
+        except Exception as e:
+            logging.error(f"System monitor error: {e}")
+        finally:
+            self.conn.close()
+
+if __name__ == "__main__":
+    monitor = SystemMonitor()
+    monitor.run()
+EOF
+
+    chmod +x "$INSTALL_DIR/monitor.py"
+}
+
+# Create enhanced management script
+create_enhanced_management_script() {
+    log_info "Creating enhanced management script..."
+    
+    # Download or create enhanced management script
     cat > /usr/local/bin/gx-tunnel << 'EOF'
 #!/bin/bash
 
-# GX Tunnel Management Script
+# GX Tunnel Enhanced Management Script
 # Created by Jawad - Telegram: @jawadx
 
 # Constants
 GX_TUNNEL_SERVICE="gx-tunnel"
 GX_WEBGUI_SERVICE="gx-webgui"
+GX_MONITOR_SERVICE="gx-monitor"
 INSTALL_DIR="/opt/gx_tunnel"
-PYTHON_SCRIPT_PATH="$INSTALL_DIR/gx_websocket.py"
-WEBGUI_SCRIPT_PATH="$INSTALL_DIR/webgui.py"
-LOG_FILE="/var/log/gx_tunnel/websocket.log"
+LOG_DIR="/var/log/gx_tunnel"
 USER_DB="$INSTALL_DIR/users.json"
 STATS_DB="$INSTALL_DIR/statistics.db"
+CONFIG_FILE="$INSTALL_DIR/config.json"
 
 # Color codes for pretty output
 RED='\033[0;31m'
@@ -619,6 +1030,8 @@ display_banner() {
    echo -e "│                 ${GREEN}🚀 Features:${BLUE}                            │"
    echo -e "│    ${GREEN}✅ Web GUI Admin${BLUE}       ${YELLOW}🌐 Real-time Stats${BLUE}          │"
    echo -e "│    ${CYAN}🔒 Fail2Ban Protection${BLUE}  ${PURPLE}⚡ Unlimited Bandwidth${BLUE}       │"
+   echo -e "│    ${WHITE}📊 Auto Backup${BLUE}         ${GREEN}🔄 Auto Update${BLUE}              │"
+   echo -e "│    ${YELLOW}🔧 Multi-Port${BLUE}         ${RED}🛡️  DDoS Protection${BLUE}           │"
    echo -e "│                                                         │"
    echo -e "│              ${WHITE}Created by: Jawad${BLUE}                         │"
    echo -e "│           ${YELLOW}Telegram: @jawadx${BLUE}                           │"
@@ -651,7 +1064,7 @@ get_server_ip() {
     fi
 }
 
-# Function to load user database
+# Enhanced user management functions
 load_user_db() {
     if [ -f "$USER_DB" ]; then
         cat "$USER_DB"
@@ -660,14 +1073,13 @@ load_user_db() {
     fi
 }
 
-# Function to save user database
 save_user_db() {
     local data="$1"
     echo "$data" > "$USER_DB"
     chmod 600 "$USER_DB"
 }
 
-# Fixed function to add user - without system user creation
+# Enhanced add user function
 add_tunnel_user() {
     echo -e "${WHITE}👤 CREATE SSH TUNNEL USER${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
@@ -730,7 +1142,7 @@ add_tunnel_user() {
     show_user_config "$username" "$password" "$expiry_date" "$max_connections"
 }
 
-# Function to show user configuration
+# Enhanced user configuration display
 show_user_config() {
     local username="$1"
     local password="$2"
@@ -768,46 +1180,251 @@ show_user_config() {
     echo -e "${CYAN}└───────────────────────────────────────────────────────────┘${NC}"
 }
 
-# Function to delete user
-delete_tunnel_user() {
-    echo -e "${WHITE}🗑️  DELETE SSH TUNNEL USER${NC}"
+# Enhanced service status
+show_service_status() {
+    echo -e "${WHITE}📊 SERVICE STATUS${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
     
-    local user_db=$(load_user_db)
-    local users=$(echo "$user_db" | jq -r '.users[] | "\(.username) (\(.created))"')
+    local server_ip=$(get_server_ip)
+    local tunnel_status=$(systemctl is-active "$GX_TUNNEL_SERVICE")
+    local webgui_status=$(systemctl is-active "$GX_WEBGUI_SERVICE")
+    local monitor_status=$(systemctl is-active "$GX_MONITOR_SERVICE")
     
-    if [ -z "$users" ]; then
-        echo -e "${YELLOW}⚠️  No users found${NC}"
-        return
+    echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
+    
+    if [ "$tunnel_status" = "active" ]; then
+        echo -e "${WHITE}│ ${GREEN}🟢 Tunnel Service: ${GREEN}ACTIVE${WHITE}                            │${NC}"
+    else
+        echo -e "${WHITE}│ ${RED}🔴 Tunnel Service: ${RED}INACTIVE${WHITE}                          │${NC}"
     fi
     
-    echo -e "${YELLOW}Available users:${NC}"
-    echo "$users" | nl -w 2 -s ') '
-    echo
-    
-    read -p "Enter username to delete: " username
-    
-    if [ -z "$username" ]; then
-        echo -e "${RED}❌ Username cannot be empty${NC}"
-        return
+    if [ "$webgui_status" = "active" ]; then
+        echo -e "${WHITE}│ ${GREEN}🟢 Web GUI: ${GREEN}ACTIVE${WHITE}                                 │${NC}"
+    else
+        echo -e "${WHITE}│ ${RED}🔴 Web GUI: ${RED}INACTIVE${WHITE}                               │${NC}"
     fi
-
-    # Check if user exists
-    local user_exists=$(echo "$user_db" | jq -r ".users[] | select(.username == \"$username\") | .username")
     
-    if [ -z "$user_exists" ]; then
-        echo -e "${RED}❌ User $username not found${NC}"
-        return
+    if [ "$monitor_status" = "active" ]; then
+        echo -e "${WHITE}│ ${GREEN}🟢 Monitor: ${GREEN}ACTIVE${WHITE}                                │${NC}"
+    else
+        echo -e "${WHITE}│ ${YELLOW}🟡 Monitor: ${YELLOW}INACTIVE${WHITE}                             │${NC}"
     fi
-
-    # Remove from database only
-    local updated_db=$(echo "$user_db" | jq "del(.users[] | select(.username == \"$username\"))")
-    save_user_db "$updated_db"
     
-    echo -e "${GREEN}✅ User $username deleted successfully${NC}"
+    echo -e "${WHITE}│ ${CYAN}📍 Server IP: ${YELLOW}$server_ip${WHITE}                         │${NC}"
+    echo -e "${WHITE}│ ${CYAN}🌐 Tunnel Port: ${YELLOW}8080${WHITE}                               │${NC}"
+    echo -e "${WHITE}│ ${CYAN}🖥️  Web GUI Port: ${YELLOW}8081${WHITE}                              │${NC}"
+    echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
 }
 
-# Function to list users with details
+# Enhanced statistics
+show_enhanced_stats() {
+    echo -e "${WHITE}📈 ENHANCED STATISTICS${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    
+    if [ -f "$STATS_DB" ]; then
+        # Get total users
+        local user_db=$(load_user_db)
+        local total_users=$(echo "$user_db" | jq '.users | length')
+        
+        # Get connection stats from database
+        local total_connections=$(sqlite3 "$STATS_DB" "SELECT COUNT(*) FROM connection_log;" 2>/dev/null || echo "0")
+        local total_download=$(sqlite3 "$STATS_DB" "SELECT SUM(download_bytes) FROM connection_log;" 2>/dev/null || echo "0")
+        local total_upload=$(sqlite3 "$STATS_DB" "SELECT SUM(upload_bytes) FROM connection_log;" 2>/dev/null || echo "0")
+        
+        # Convert bytes to human readable
+        download_human=$(numfmt --to=iec --suffix=B "$total_download" 2>/dev/null || echo "0B")
+        upload_human=$(numfmt --to=iec --suffix=B "$total_upload" 2>/dev/null || echo "0B")
+        
+        echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
+        echo -e "${WHITE}│ ${CYAN}👥 Total Users: ${YELLOW}$total_users${WHITE}                                   │${NC}"
+        echo -e "${WHITE}│ ${CYAN}🔗 Total Connections: ${YELLOW}$total_connections${WHITE}                           │${NC}"
+        echo -e "${WHITE}│ ${CYAN}📥 Total Download: ${YELLOW}$download_human${WHITE}                           │${NC}"
+        echo -e "${WHITE}│ ${CYAN}📤 Total Upload: ${YELLOW}$upload_human${WHITE}                             │${NC}"
+        echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
+        
+        # Show recent connections
+        echo
+        echo -e "${YELLOW}🕒 Recent Connections:${NC}"
+        sqlite3 -header -column "$STATS_DB" "SELECT username, client_ip, duration, download_bytes, upload_bytes FROM connection_log ORDER BY id DESC LIMIT 5;" 2>/dev/null || echo "No connection data available"
+    else
+        echo -e "${RED}Statistics database not found${NC}"
+    fi
+}
+
+# Backup function
+backup_system() {
+    echo -e "${WHITE}💾 BACKUP SYSTEM${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    
+    if [ -f "$INSTALL_DIR/backup.sh" ]; then
+        bash "$INSTALL_DIR/backup.sh"
+    else
+        echo -e "${RED}Backup script not found${NC}"
+    fi
+}
+
+# Update function
+update_system() {
+    echo -e "${WHITE}🔄 UPDATE SYSTEM${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    
+    if [ -f "$INSTALL_DIR/update.sh" ]; then
+        bash "$INSTALL_DIR/update.sh"
+    else
+        echo -e "${RED}Update script not found${NC}"
+    fi
+}
+
+# Monitor function
+show_monitor() {
+    echo -e "${WHITE}📊 REAL-TIME MONITOR${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    echo -e "${YELLOW}Press Ctrl+C to stop monitoring${NC}"
+    echo
+    
+    while true; do
+        clear
+        show_header
+        show_service_status
+        echo
+        show_enhanced_stats
+        echo
+        echo -e "${CYAN}Refreshing every 5 seconds...${NC}"
+        sleep 5
+    done
+}
+
+# Enhanced main menu
+show_main_menu() {
+    while true; do
+        show_header
+        
+        echo -e "${WHITE}🏠 ENHANCED MAIN MENU${NC}"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+        echo -e "${WHITE}1) ${GREEN}👤 User Management${NC}"
+        echo -e "${WHITE}2) ${YELLOW}🚀 Service Control${NC}"
+        echo -e "${WHITE}3) ${BLUE}📊 Service Status${NC}"
+        echo -e "${WHITE}4) ${PURPLE}💻 System Statistics${NC}"
+        echo -e "${WHITE}5) ${CYAN}📋 View Users${NC}"
+        echo -e "${WHITE}6) ${WHITE}📜 Real-time Logs${NC}"
+        echo -e "${WHITE}7) ${GREEN}📈 Enhanced Stats${NC}"
+        echo -e "${WHITE}8) ${YELLOW}🔍 Real-time Monitor${NC}"
+        echo -e "${WHITE}9) ${BLUE}💾 Backup System${NC}"
+        echo -e "${WHITE}10) ${PURPLE}🔄 Update System${NC}"
+        echo -e "${WHITE}0) ${RED}❌ Exit${NC}"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+        
+        read -p "Enter your choice [0-10]: " choice
+        
+        case $choice in
+            1) show_user_management_menu ;;
+            2) show_service_control_menu ;;
+            3) show_service_status; read -p "Press Enter to continue..." ;;
+            4) show_system_stats; read -p "Press Enter to continue..." ;;
+            5) list_tunnel_users; read -p "Press Enter to continue..." ;;
+            6) show_realtime_logs ;;
+            7) show_enhanced_stats; read -p "Press Enter to continue..." ;;
+            8) show_monitor ;;
+            9) backup_system; read -p "Press Enter to continue..." ;;
+            10) update_system; read -p "Press Enter to continue..." ;;
+            0) echo -e "${GREEN}👋 Thank you for using GX Tunnel!${NC}"; exit 0 ;;
+            *) echo -e "${RED}❌ Invalid choice. Please try again.${NC}"; sleep 2 ;;
+        esac
+    done
+}
+
+# Enhanced user management menu
+show_user_management_menu() {
+    while true; do
+        show_header
+        
+        echo -e "${WHITE}👤 ENHANCED USER MANAGEMENT${NC}"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+        echo -e "${WHITE}1) ${GREEN}➕ Add User${NC}"
+        echo -e "${WHITE}2) ${RED}🗑️  Delete User${NC}"
+        echo -e "${WHITE}3) ${BLUE}📋 List Users${NC}"
+        echo -e "${WHITE}4) ${YELLOW}📊 User Statistics${NC}"
+        echo -e "${WHITE}5) ${PURPLE}🔙 Back to Main Menu${NC}"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+        
+        read -p "Enter your choice [1-5]: " choice
+        
+        case $choice in
+            1) add_tunnel_user; read -p "Press Enter to continue..." ;;
+            2) delete_tunnel_user; read -p "Press Enter to continue..." ;;
+            3) list_tunnel_users; read -p "Press Enter to continue..." ;;
+            4) show_user_statistics; read -p "Press Enter to continue..." ;;
+            5) break ;;
+            *) echo -e "${RED}❌ Invalid choice. Please try again.${NC}"; sleep 2 ;;
+        esac
+    done
+}
+
+# Service control menu
+show_service_control_menu() {
+    while true; do
+        show_header
+        
+        echo -e "${WHITE}🚀 SERVICE CONTROL${NC}"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+        echo -e "${WHITE}1) ${GREEN}▶️  Start Services${NC}"
+        echo -e "${WHITE}2) ${RED}⏹️  Stop Services${NC}"
+        echo -e "${WHITE}3) ${YELLOW}🔄 Restart Services${NC}"
+        echo -e "${WHITE}4) ${BLUE}📊 Service Status${NC}"
+        echo -e "${WHITE}5) ${PURPLE}🔙 Back to Main Menu${NC}"
+        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+        
+        read -p "Enter your choice [1-5]: " choice
+        
+        case $choice in
+            1) start_services; read -p "Press Enter to continue..." ;;
+            2) stop_services; read -p "Press Enter to continue..." ;;
+            3) restart_services; read -p "Press Enter to continue..." ;;
+            4) show_service_status; read -p "Press Enter to continue..." ;;
+            5) break ;;
+            *) echo -e "${RED}❌ Invalid choice. Please try again.${NC}"; sleep 2 ;;
+        esac
+    done
+}
+
+# Include other functions from the original script...
+# [Previous functions like start_services, stop_services, list_tunnel_users, etc.]
+
+# Service control functions
+start_services() {
+    echo -e "${WHITE}🚀 STARTING GX TUNNEL SERVICES${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    
+    systemctl start "$GX_TUNNEL_SERVICE"
+    systemctl start "$GX_WEBGUI_SERVICE"
+    systemctl start "$GX_MONITOR_SERVICE"
+    sleep 2
+    show_service_status
+}
+
+stop_services() {
+    echo -e "${WHITE}🛑 STOPPING GX TUNNEL SERVICES${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    
+    systemctl stop "$GX_TUNNEL_SERVICE"
+    systemctl stop "$GX_WEBGUI_SERVICE"
+    systemctl stop "$GX_MONITOR_SERVICE"
+    sleep 2
+    show_service_status
+}
+
+restart_services() {
+    echo -e "${WHITE}🔄 RESTARTING GX TUNNEL SERVICES${NC}"
+    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
+    
+    systemctl restart "$GX_TUNNEL_SERVICE"
+    systemctl restart "$GX_WEBGUI_SERVICE"
+    systemctl restart "$GX_MONITOR_SERVICE"
+    sleep 2
+    show_service_status
+}
+
+# List users function
 list_tunnel_users() {
     echo -e "${WHITE}📋 SSH TUNNEL USERS${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
@@ -846,38 +1463,48 @@ list_tunnel_users() {
     echo -e "${WHITE}└─────────────────────────────────────────────────────────────────────────────────┘${NC}"
 }
 
-# Function to show service status
-show_service_status() {
-    echo -e "${WHITE}📊 SERVICE STATUS${NC}"
+# Delete user function
+delete_tunnel_user() {
+    echo -e "${WHITE}🗑️  DELETE SSH TUNNEL USER${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
     
-    local server_ip=$(get_server_ip)
-    local tunnel_status=$(systemctl is-active "$GX_TUNNEL_SERVICE")
-    local webgui_status=$(systemctl is-active "$GX_WEBGUI_SERVICE")
+    local user_db=$(load_user_db)
+    local users=$(echo "$user_db" | jq -r '.users[] | "\(.username) (\(.created))"')
     
-    echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
-    
-    if [ "$tunnel_status" = "active" ]; then
-        echo -e "${WHITE}│ ${GREEN}🟢 Tunnel Service: ${GREEN}ACTIVE${WHITE}                            │${NC}"
-    else
-        echo -e "${WHITE}│ ${RED}🔴 Tunnel Service: ${RED}INACTIVE${WHITE}                          │${NC}"
+    if [ -z "$users" ]; then
+        echo -e "${YELLOW}⚠️  No users found${NC}"
+        return
     fi
     
-    if [ "$webgui_status" = "active" ]; then
-        echo -e "${WHITE}│ ${GREEN}🟢 Web GUI: ${GREEN}ACTIVE${WHITE}                                 │${NC}"
-    else
-        echo -e "${WHITE}│ ${RED}🔴 Web GUI: ${RED}INACTIVE${WHITE}                               │${NC}"
-    fi
+    echo -e "${YELLOW}Available users:${NC}"
+    echo "$users" | nl -w 2 -s ') '
+    echo
     
-    echo -e "${WHITE}│ ${CYAN}📍 Server IP: ${YELLOW}$server_ip${WHITE}                         │${NC}"
-    echo -e "${WHITE}│ ${CYAN}🌐 Tunnel Port: ${YELLOW}8080${WHITE}                               │${NC}"
-    echo -e "${WHITE}│ ${CYAN}🖥️  Web GUI Port: ${YELLOW}8081${WHITE}                              │${NC}"
-    echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
+    read -p "Enter username to delete: " username
+    
+    if [ -z "$username" ]; then
+        echo -e "${RED}❌ Username cannot be empty${NC}"
+        return
+    fi
+
+    # Check if user exists
+    local user_exists=$(echo "$user_db" | jq -r ".users[] | select(.username == \"$username\") | .username")
+    
+    if [ -z "$user_exists" ]; then
+        echo -e "${RED}❌ User $username not found${NC}"
+        return
+    fi
+
+    # Remove from database only
+    local updated_db=$(echo "$user_db" | jq "del(.users[] | select(.username == \"$username\"))")
+    save_user_db "$updated_db"
+    
+    echo -e "${GREEN}✅ User $username deleted successfully${NC}"
 }
 
-# Function to show VPS statistics
-show_vps_stats() {
-    echo -e "${WHITE}💻 VPS STATISTICS${NC}"
+# System statistics
+show_system_stats() {
+    echo -e "${WHITE}💻 SYSTEM STATISTICS${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
     
     local cpu_usage=$(top -bn1 | grep "Cpu(s)" | awk '{print $2}' | cut -d'%' -f1)
@@ -885,58 +1512,41 @@ show_vps_stats() {
     local disk_usage=$(df -h / | awk 'NR==2{print $5}')
     local uptime=$(uptime -p)
     local server_ip=$(get_server_ip)
+    local load_avg=$(uptime | awk -F'load average:' '{print $2}')
     
     echo -e "${WHITE}┌─────────────────────────────────────────────────────────┐${NC}"
     echo -e "${WHITE}│ ${CYAN}📍 Server IP: ${YELLOW}$server_ip${WHITE}                         │${NC}"
     echo -e "${WHITE}│ ${CYAN}🖥️  CPU Usage: ${YELLOW}$cpu_usage%${WHITE}                               │${NC}"
     echo -e "${WHITE}│ ${CYAN}💾 Memory Usage: ${YELLOW}$memory_info${WHITE}                            │${NC}"
     echo -e "${WHITE}│ ${CYAN}💿 Disk Usage: ${YELLOW}$disk_usage${WHITE}                               │${NC}"
+    echo -e "${WHITE}│ ${CYAN}📊 Load Average: ${YELLOW}$load_avg${WHITE}                           │${NC}"
     echo -e "${WHITE}│ ${CYAN}⏱️  Uptime: ${YELLOW}$uptime${WHITE}                           │${NC}"
     echo -e "${WHITE}└─────────────────────────────────────────────────────────┘${NC}"
 }
 
-# Function to start services
-start_services() {
-    echo -e "${WHITE}🚀 STARTING GX TUNNEL SERVICES${NC}"
+# User statistics
+show_user_statistics() {
+    echo -e "${WHITE}📊 USER STATISTICS${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
     
-    systemctl start "$GX_TUNNEL_SERVICE"
-    systemctl start "$GX_WEBGUI_SERVICE"
-    sleep 2
-    show_service_status
+    if [ -f "$STATS_DB" ]; then
+        echo -e "${YELLOW}User Connection Statistics:${NC}"
+        sqlite3 -header -column "$STATS_DB" "SELECT username, connections, download_bytes, upload_bytes FROM user_stats ORDER BY connections DESC LIMIT 10;" 2>/dev/null || echo "No user statistics available"
+    else
+        echo -e "${RED}Statistics database not found${NC}"
+    fi
 }
 
-# Function to stop services
-stop_services() {
-    echo -e "${WHITE}🛑 STOPPING GX TUNNEL SERVICES${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-    
-    systemctl stop "$GX_TUNNEL_SERVICE"
-    systemctl stop "$GX_WEBGUI_SERVICE"
-    sleep 2
-    show_service_status
-}
-
-# Function to restart services
-restart_services() {
-    echo -e "${WHITE}🔄 RESTARTING GX TUNNEL SERVICES${NC}"
-    echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-    
-    systemctl restart "$GX_TUNNEL_SERVICE"
-    systemctl restart "$GX_WEBGUI_SERVICE"
-    sleep 2
-    show_service_status
-}
-
-# Function to show real-time logs
+# Real-time logs
 show_realtime_logs() {
     echo -e "${WHITE}📋 REAL-TIME LOGS${NC}"
     echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
     echo -e "${YELLOW}Press Ctrl+C to stop viewing logs${NC}"
     echo
     
-    if [ -f "$LOG_FILE" ]; then
-        tail -f "$LOG_FILE" | while read line; do
+    local log_file="$LOG_DIR/websocket.log"
+    if [ -f "$log_file" ]; then
+        tail -f "$log_file" | while read line; do
             if [[ $line == *"ERROR"* ]] || [[ $line == *"Failed"* ]]; then
                 echo -e "${RED}$line${NC}"
             elif [[ $line == *"WARNING"* ]]; then
@@ -952,110 +1562,8 @@ show_realtime_logs() {
             fi
         done
     else
-        echo -e "${RED}Log file not found: $LOG_FILE${NC}"
+        echo -e "${RED}Log file not found: $log_file${NC}"
     fi
-}
-
-# Main menu function
-show_main_menu() {
-    while true; do
-        show_header
-        
-        echo -e "${WHITE}🏠 MAIN MENU${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        echo -e "${WHITE}1) ${GREEN}👤 User Management${NC}"
-        echo -e "${WHITE}2) ${YELLOW}🚀 Service Control${NC}"
-        echo -e "${WHITE}3) ${BLUE}📊 Service Status${NC}"
-        echo -e "${WHITE}4) ${PURPLE}💻 VPS Statistics${NC}"
-        echo -e "${WHITE}5) ${CYAN}📋 View Users${NC}"
-        echo -e "${WHITE}6) ${WHITE}📜 Real-time Logs${NC}"
-        echo -e "${WHITE}7) ${GREEN}🔄 Restart Services${NC}"
-        echo -e "${WHITE}8) ${RED}🛑 Stop Services${NC}"
-        echo -e "${WHITE}0) ${RED}❌ Exit${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        
-        read -p "Enter your choice [0-8]: " choice
-        
-        case $choice in
-            1)
-                show_user_management_menu
-                ;;
-            2)
-                start_services
-                read -p "Press Enter to continue..."
-                ;;
-            3)
-                show_service_status
-                read -p "Press Enter to continue..."
-                ;;
-            4)
-                show_vps_stats
-                read -p "Press Enter to continue..."
-                ;;
-            5)
-                list_tunnel_users
-                read -p "Press Enter to continue..."
-                ;;
-            6)
-                show_realtime_logs
-                ;;
-            7)
-                restart_services
-                read -p "Press Enter to continue..."
-                ;;
-            8)
-                stop_services
-                read -p "Press Enter to continue..."
-                ;;
-            0)
-                echo -e "${GREEN}👋 Thank you for using GX Tunnel!${NC}"
-                exit 0
-                ;;
-            *)
-                echo -e "${RED}❌ Invalid choice. Please try again.${NC}"
-                sleep 2
-                ;;
-        esac
-    done
-}
-
-# User management menu
-show_user_management_menu() {
-    while true; do
-        show_header
-        
-        echo -e "${WHITE}👤 USER MANAGEMENT${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        echo -e "${WHITE}1) ${GREEN}➕ Add User${NC}"
-        echo -e "${WHITE}2) ${RED}🗑️  Delete User${NC}"
-        echo -e "${WHITE}3) ${BLUE}📋 List Users${NC}"
-        echo -e "${WHITE}4) ${YELLOW}🔙 Back to Main Menu${NC}"
-        echo -e "${CYAN}───────────────────────────────────────────────────────────${NC}"
-        
-        read -p "Enter your choice [1-4]: " choice
-        
-        case $choice in
-            1)
-                add_tunnel_user
-                read -p "Press Enter to continue..."
-                ;;
-            2)
-                delete_tunnel_user
-                read -p "Press Enter to continue..."
-                ;;
-            3)
-                list_tunnel_users
-                read -p "Press Enter to continue..."
-                ;;
-            4)
-                break
-                ;;
-            *)
-                echo -e "${RED}❌ Invalid choice. Please try again.${NC}"
-                sleep 2
-                ;;
-        esac
-    done
 }
 
 # Check dependencies
@@ -1101,23 +1609,35 @@ case "${1:-}" in
         list_tunnel_users
         ;;
     "stats")
-        show_vps_stats
+        show_enhanced_stats
+        ;;
+    "monitor")
+        show_monitor
+        ;;
+    "backup")
+        backup_system
+        ;;
+    "update")
+        update_system
         ;;
     "logs")
         show_realtime_logs
         ;;
     *)
-        echo -e "${GREEN}Usage: $0 {menu|start|stop|restart|status|add-user|list-users|stats|logs}${NC}"
+        echo -e "${GREEN}Usage: $0 {menu|start|stop|restart|status|add-user|list-users|stats|monitor|backup|update|logs}${NC}"
         echo
-        echo -e "${WHITE}Commands:${NC}"
+        echo -e "${WHITE}Enhanced Commands:${NC}"
         echo -e "  ${CYAN}menu${NC}       - Show interactive menu"
-        echo -e "  ${CYAN}start${NC}      - Start services"
-        echo -e "  ${CYAN}stop${NC}       - Stop services"
-        echo -e "  ${CYAN}restart${NC}    - Restart services"
+        echo -e "  ${CYAN}start${NC}      - Start all services"
+        echo -e "  ${CYAN}stop${NC}       - Stop all services"
+        echo -e "  ${CYAN}restart${NC}    - Restart all services"
         echo -e "  ${CYAN}status${NC}     - Show service status"
         echo -e "  ${CYAN}add-user${NC}   - Add new tunnel user"
         echo -e "  ${CYAN}list-users${NC} - List all users"
-        echo -e "  ${CYAN}stats${NC}      - Show VPS statistics"
+        echo -e "  ${CYAN}stats${NC}      - Show enhanced statistics"
+        echo -e "  ${CYAN}monitor${NC}    - Real-time monitoring"
+        echo -e "  ${CYAN}backup${NC}     - Backup system"
+        echo -e "  ${CYAN}update${NC}     - Update system"
         echo -e "  ${CYAN}logs${NC}       - Show real-time logs"
         exit 1
         ;;
@@ -1125,7 +1645,6 @@ esac
 EOF
 
     chmod +x /usr/local/bin/gx-tunnel
-    log_success "Fixed management script installed"
 }
 
 # Verify installation
@@ -1143,7 +1662,7 @@ verify_installation() {
     [ -f "$INSTALL_DIR/config.json" ] || { log_error "Config file missing"; ((errors++)); }
     
     log_info "Checking Python packages..."
-    python3 -c "import flask, flask_cors, psutil, requests" > /dev/null 2>&1 || { 
+    python3 -c "import flask, flask_cors, psutil, requests, socketio, eventlet" > /dev/null 2>&1 || { 
         log_error "Python packages not installed properly"; 
         ((errors++)); 
     }
@@ -1166,15 +1685,17 @@ start_services() {
     show_progress_banner "12" "Starting Services"
     
     log_info "Starting main services..."
-    systemctl start "$SERVICE_NAME" "$WEBGUI_SERVICE"
+    systemctl start "$SERVICE_NAME" "$WEBGUI_SERVICE" "gx-monitor"
     
-    sleep 3
+    sleep 5
     
     local tunnel_status=$(systemctl is-active "$SERVICE_NAME")
     local webgui_status=$(systemctl is-active "$WEBGUI_SERVICE")
+    local monitor_status=$(systemctl is-active "gx-monitor")
     
     if [ "$tunnel_status" = "active" ] && [ "$webgui_status" = "active" ]; then
         show_success_banner "All services started successfully"
+        log_info "Monitor service status: $monitor_status"
         return 0
     else
         log_warning "Services partially started (Tunnel: $tunnel_status, WebGUI: $webgui_status)"
@@ -1182,6 +1703,25 @@ start_services() {
         journalctl -u "$SERVICE_NAME" -u "$WEBGUI_SERVICE" --no-pager -n 10
         return 1
     fi
+}
+
+# Create SSL certificate (optional)
+create_ssl_certificate() {
+    show_progress_banner "13" "Setting Up SSL (Optional)"
+    
+    local domain=$(jq -r '.server.domain' "$CONFIG_FILE" 2>/dev/null)
+    local ssl_enabled=$(jq -r '.server.ssl_enabled' "$CONFIG_FILE" 2>/dev/null)
+    
+    if [ "$ssl_enabled" = "true" ] && [ -n "$domain" ] && [ "$domain" != "null" ]; then
+        log_info "SSL enabled for domain: $domain"
+        log_info "To set up SSL certificate, run:"
+        echo -e "${YELLOW}  certbot --nginx -d $domain${NC}"
+        echo -e "${YELLOW}  Then update $CONFIG_FILE with SSL certificate paths${NC}"
+    else
+        log_info "SSL not configured. You can enable it later in the Web GUI"
+    fi
+    
+    echo
 }
 
 # Beautiful installation summary
@@ -1207,12 +1747,13 @@ show_installation_summary() {
     echo -e "  ${BLUE}└─ ${YELLOW}Admin: ${GREEN}admin / admin123${NC}"
     echo
     echo -e "${WHITE}🛡️  ${CYAN}Security Features:${NC}"
-    echo -e "  ${BLUE}└─ ${GREEN}✅ Fail2Ban Protection${NC}"
-    echo -e "  ${BLUE}└─ ${GREEN}✅ DDoS Protection${NC}"
-    echo -e "  ${BLUE}└─ ${GREEN}✅ Auto Backup${NC}"
+    echo -e "  ${BLUE}└─ ${GREEN}✅ Enhanced Fail2Ban Protection${NC}"
+    echo -e "  ${BLUE}└─ ${GREEN}✅ Advanced DDoS Protection${NC}"
+    echo -e "  ${BLUE}└─ ${GREEN}✅ Auto Backup System${NC}"
     echo -e "  ${BLUE}└─ ${GREEN}✅ Rate Limiting${NC}"
+    echo -e "  ${BLUE}└─ ${GREEN}✅ Connection Monitoring${NC}"
     echo
-    echo -e "${WHITE}🚀 ${CYAN}Available Commands:${NC}"
+    echo -e "${WHITE}🚀 ${CYAN}Enhanced Commands:${NC}"
     echo -e "  ${GREEN}└─ gx-tunnel menu${NC}         - Interactive menu"
     echo -e "  ${GREEN}└─ gx-tunnel start${NC}        - Start services"
     echo -e "  ${GREEN}└─ gx-tunnel status${NC}       - Service status"
@@ -1221,12 +1762,14 @@ show_installation_summary() {
     echo -e "  ${GREEN}└─ gx-tunnel update${NC}       - Update system"
     echo -e "  ${GREEN}└─ gx-tunnel stats${NC}        - Show statistics"
     echo -e "  ${GREEN}└─ gx-tunnel monitor${NC}      - Real-time monitor"
+    echo -e "  ${GREEN}└─ gx-tunnel logs${NC}         - View logs"
     echo
     echo -e "${WHITE}⏰ ${CYAN}Next Steps:${NC}"
     echo -e "  ${BLUE}1. ${YELLOW}Access Web GUI: ${GREEN}http://$server_ip:8081${NC}"
     echo -e "  ${BLUE}2. ${YELLOW}Add user: ${GREEN}gx-tunnel add-user${NC}"
     echo -e "  ${BLUE}3. ${YELLOW}Check status: ${GREEN}gx-tunnel status${NC}"
     echo -e "  ${BLUE}4. ${YELLOW}Monitor: ${GREEN}gx-tunnel monitor${NC}"
+    echo -e "  ${BLUE}5. ${YELLOW}Configure domain & SSL in Web GUI${NC}"
     echo
     echo -e "${PURPLE}💫 ${WHITE}Thank you for choosing GX Tunnel!${NC}"
     echo
@@ -1236,7 +1779,7 @@ show_installation_summary() {
 main() {
     display_banner
     echo
-    echo -e "${GREEN}🚀 [GX TUNNEL] Starting installation...${NC}"
+    echo -e "${GREEN}🚀 [GX TUNNEL] Starting enhanced installation...${NC}"
     echo
     
     # Execute installation steps
@@ -1248,11 +1791,13 @@ main() {
     copy_local_files
     create_backup_script
     create_update_script
-    fix_management_script  # Fixed user creation issue
+    create_monitoring_script
+    create_enhanced_management_script
     create_services
     setup_firewall
     setup_fail2ban
     setup_log_rotation
+    create_ssl_certificate
     
     # Verify and start
     if verify_installation; then
@@ -1261,11 +1806,11 @@ main() {
             
             # Display important notes
             echo -e "${YELLOW}📝 Important Notes:${NC}"
-            echo -e "  ${WHITE}• ${CYAN}Auto-backup runs every 6 hours${NC}"
-            echo -e "  ${WHITE}• ${CYAN}Auto-update checks daily at 3 AM${NC}"
-            echo -e "  ${WHITE}• ${CYAN}Fail2Ban monitors SSH and web services${NC}"
-            echo -e "  ${WHITE}• ${CYAN}DDoS protection is enabled${NC}"
-            echo -e "  ${WHITE}• ${CYAN}Fixed: User creation without system accounts${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Auto-backup runs daily${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Real-time monitoring enabled${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Enhanced security features active${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Web GUI with full API support${NC}"
+            echo -e "  ${WHITE}• ${CYAN}No system users - JSON database only${NC}"
             echo
             echo -e "${GREEN}🔧 For support: ${YELLOW}Telegram: @jawadx${NC}"
             echo
