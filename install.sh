@@ -113,6 +113,11 @@ clean_previous_installation() {
     log_info "Removing service files..."
     rm -f /etc/systemd/system/"$SERVICE_NAME".service
     rm -f /etc/systemd/system/"$WEBGUI_SERVICE".service
+    rm -f /etc/systemd/system/gx-tunnel-update.service
+    rm -f /etc/systemd/system/gx-tunnel-update.timer
+    rm -f /etc/systemd/system/gx-tunnel-backup.service
+    rm -f /etc/systemd/system/gx-tunnel-backup.timer
+    rm -f /etc/systemd/system/iptables-restore.service
     
     log_info "Removing directories..."
     rm -rf "$INSTALL_DIR"
@@ -125,6 +130,8 @@ clean_previous_installation() {
     crontab -l 2>/dev/null | grep -v "gx-tunnel" | crontab - 2>/dev/null
     
     systemctl daemon-reload
+    systemctl reset-failed
+    
     show_success_banner "Previous installation cleaned completely"
     echo
 }
@@ -136,6 +143,11 @@ install_dependencies() {
     log_info "Updating package list..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
+    
+    # Pre-configure iptables-persistent to avoid prompts
+    log_info "Configuring iptables-persistent for non-interactive installation..."
+    echo 'iptables-persistent iptables-persistent/autosave_v4 boolean true' | debconf-set-selections
+    echo 'iptables-persistent iptables-persistent/autosave_v6 boolean true' | debconf-set-selections
     
     log_info "Installing required packages..."
     apt-get install -y -qq \
@@ -152,16 +164,8 @@ install_dependencies() {
         fail2ban \
         htop \
         iftop \
-        nethogs
-
-    # Force non-interactive mode for iptables-persistent
-    log_info "Preconfiguring iptables-persistent..."
-    echo 'iptables-persistent iptables-persistent/autosave_v4 boolean true' | debconf-set-selections
-    echo 'iptables-persistent iptables-persistent/autosave_v6 boolean true' | debconf-set-selections
-    
-    log_info "Installing required packages (this may take a moment)..."
-    apt-get install -y -qq \
-        python3 python3-pip python3-venv wget curl net-tools sudo ufw jq sqlite3 fail2ban htop iftop nethogs iptables-persistent < /dev/null
+        nethogs \
+        iptables-persistent
 
     show_success_banner "All system dependencies installed"
     echo
@@ -202,31 +206,49 @@ create_directories() {
     echo
 }
 
-# Download application files
-download_files() {
-    show_progress_banner "6" "Downloading Application Files"
+# Copy local application files
+copy_local_files() {
+    show_progress_banner "6" "Copying Application Files"
     
-    local base_url="https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main"
+    # Get the directory where this script is located
+    local SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     
-    log_info "Downloading main tunnel script..."
-    if ! wget -q "$base_url/gx_websocket.py" -O "$INSTALL_DIR/gx_websocket.py"; then
-        log_error "Failed to download gx_websocket.py"
+    log_info "Copying main tunnel script..."
+    if [ -f "$SCRIPT_DIR/gx_websocket.py" ]; then
+        cp "$SCRIPT_DIR/gx_websocket.py" "$INSTALL_DIR/gx_websocket.py"
+        log_success "Tunnel script copied"
+    else
+        log_error "gx_websocket.py not found in current directory"
         return 1
     fi
     
-    log_info "Downloading web GUI script..."
-    if ! wget -q "$base_url/webgui.py" -O "$INSTALL_DIR/webgui.py"; then
-        log_error "Failed to download webgui.py"
+    log_info "Copying web GUI script..."
+    if [ -f "$SCRIPT_DIR/webgui.py" ]; then
+        cp "$SCRIPT_DIR/webgui.py" "$INSTALL_DIR/webgui.py"
+        log_success "Web GUI script copied"
+    else
+        log_error "webgui.py not found in current directory"
         return 1
     fi
     
-    log_info "Downloading management script..."
-    if ! wget -q "$base_url/gx-tunnel.sh" -O /usr/local/bin/gx-tunnel; then
-        log_error "Failed to download management script"
+    log_info "Copying management script..."
+    if [ -f "$SCRIPT_DIR/gx_manager.sh" ]; then
+        cp "$SCRIPT_DIR/gx_manager.sh" "/usr/local/bin/gx-tunnel"
+        chmod +x "/usr/local/bin/gx-tunnel"
+        log_success "Management script installed"
+    else
+        log_error "gx_manager.sh not found in current directory"
         return 1
     fi
     
-    chmod +x /usr/local/bin/gx-tunnel
+    log_info "Copying configuration file..."
+    if [ -f "$SCRIPT_DIR/config.json" ]; then
+        cp "$SCRIPT_DIR/config.json" "$INSTALL_DIR/config.json"
+        log_success "Configuration file copied"
+    else
+        log_warning "config.json not found, creating default..."
+        create_default_config
+    fi
     
     log_info "Creating users database..."
     cat > "$INSTALL_DIR/users.json" << 'EOF'
@@ -282,8 +304,12 @@ EOF
     sqlite3 "$INSTALL_DIR/statistics.db" < "$INSTALL_DIR/create_tables.sql"
     rm -f "$INSTALL_DIR/create_tables.sql"
     
-    # Create configuration file
-    log_info "Creating configuration file..."
+    show_success_banner "All application files copied successfully"
+    echo
+}
+
+# Create default config if not provided
+create_default_config() {
     cat > "$INSTALL_DIR/config.json" << 'EOF'
 {
     "server": {
@@ -319,9 +345,6 @@ EOF
     }
 }
 EOF
-
-    show_success_banner "All application files downloaded"
-    echo
 }
 
 # Create systemd services
@@ -333,7 +356,7 @@ create_services() {
 [Unit]
 Description=GX Tunnel WebSocket Service
 After=network.target
-Wants=fail2ban.service
+Wants=network.target
 
 [Service]
 Type=simple
@@ -361,7 +384,7 @@ EOF
 [Unit]
 Description=GX Tunnel Web GUI
 After=network.target
-Wants=$SERVICE_NAME.service
+Wants=network.target
 
 [Service]
 Type=simple
@@ -478,7 +501,7 @@ setup_firewall() {
     ufw limit 8081/tcp comment 'Web GUI Rate Limit' > /dev/null 2>&1
     
     log_info "Setting up basic DDoS protection..."
-    # Basic rate limiting with iptables (non-interactive)
+    # Basic rate limiting with iptables
     iptables -N GX_DDOS 2>/dev/null || true
     iptables -F GX_DDOS
     
@@ -516,6 +539,27 @@ filter = sshd
 logpath = /var/log/auth.log
 maxretry = 3
 bantime = 3600
+findtime = 600
+EOF
+
+    log_info "Configuring GX Tunnel protection..."
+    cat > /etc/fail2ban/jail.d/gx-tunnel.local << EOF
+[gx-tunnel]
+enabled = true
+port = 8080,8081
+filter = gx-tunnel
+logpath = $LOG_DIR/websocket.log
+maxretry = 5
+bantime = 3600
+findtime = 600
+
+[gx-webgui]
+enabled = true
+port = 8081
+filter = gx-webgui
+logpath = $LOG_DIR/webgui.log
+maxretry = 3
+bantime = 7200
 findtime = 600
 EOF
 
@@ -591,10 +635,10 @@ cd /opt/gx_tunnel
 # Backup before update
 ./backup.sh
 
-# Download latest version
+# Get the latest version from GitHub
 wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx_websocket.py -O gx_websocket.py.new
 wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/webgui.py -O webgui.py.new
-wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx-tunnel.sh -O /usr/local/bin/gx-tunnel.new
+wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx_manager.sh -O /usr/local/bin/gx-tunnel.new
 
 # Verify downloads
 if [ -s gx_websocket.py.new ] && [ -s webgui.py.new ] && [ -s /usr/local/bin/gx-tunnel.new ]; then
@@ -667,20 +711,10 @@ start_services() {
         return 0
     else
         log_warning "Services partially started (Tunnel: $tunnel_status, WebGUI: $webgui_status)"
+        log_info "Checking service logs for details..."
+        journalctl -u "$SERVICE_NAME" -u "$WEBGUI_SERVICE" --no-pager -n 10
         return 1
     fi
-}
-
-# Create management script with new features
-create_management_script() {
-    log_info "Enhancing management script..."
-    
-    # Download the enhanced management script
-    wget -q https://raw.githubusercontent.com/xcybermanx/GX_tunnel/main/gx-tunnel.sh -O /usr/local/bin/gx-tunnel
-    chmod +x /usr/local/bin/gx-tunnel
-    
-    # Create symbolic links for easy access
-    ln -sf /usr/local/bin/gx-tunnel /usr/bin/gx-tunnel 2>/dev/null || true
 }
 
 # Beautiful installation summary
@@ -744,10 +778,9 @@ main() {
     install_dependencies
     install_python_packages
     create_directories
-    download_files
+    copy_local_files
     create_backup_script
     create_update_script
-    create_management_script
     create_services
     setup_firewall
     setup_fail2ban
@@ -755,19 +788,23 @@ main() {
     
     # Verify and start
     if verify_installation; then
-        start_services
-        show_installation_summary
-        
-        # Display important notes
-        echo -e "${YELLOW}📝 Important Notes:${NC}"
-        echo -e "  ${WHITE}• ${CYAN}Auto-backup runs every 6 hours${NC}"
-        echo -e "  ${WHITE}• ${CYAN}Auto-update checks daily at 3 AM${NC}"
-        echo -e "  ${WHITE}• ${CYAN}Fail2Ban monitors SSH and web services${NC}"
-        echo -e "  ${WHITE}• ${CYAN}DDoS protection is enabled${NC}"
-        echo
-        echo -e "${GREEN}🔧 For support: ${YELLOW}Telegram: @jawadx${NC}"
-        echo
-        
+        if start_services; then
+            show_installation_summary
+            
+            # Display important notes
+            echo -e "${YELLOW}📝 Important Notes:${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Auto-backup runs every 6 hours${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Auto-update checks daily at 3 AM${NC}"
+            echo -e "  ${WHITE}• ${CYAN}Fail2Ban monitors SSH and web services${NC}"
+            echo -e "  ${WHITE}• ${CYAN}DDoS protection is enabled${NC}"
+            echo
+            echo -e "${GREEN}🔧 For support: ${YELLOW}Telegram: @jawadx${NC}"
+            echo
+            
+        else
+            log_warning "Services started with issues, but installation completed"
+            show_installation_summary
+        fi
     else
         echo -e "${RED}"
         echo -e "┌─────────────────────────────────────────────────────────┐"
