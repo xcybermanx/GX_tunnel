@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-from flask import Flask, request, jsonify, session, redirect, url_for
+from flask import Flask, request, jsonify, session, redirect, url_for, render_template_string
 from flask_cors import CORS
 import json
 import sqlite3
@@ -9,6 +9,8 @@ import os
 import re
 from datetime import datetime, timedelta
 import secrets
+import threading
+import time
 
 app = Flask(__name__)
 app.secret_key = secrets.token_hex(32)
@@ -23,6 +25,14 @@ INSTALL_DIR = "/opt/gx_tunnel"
 # Admin credentials
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "admin123"
+
+# Global data storage (instead of API calls)
+global_data = {
+    'system_stats': {},
+    'users': [],
+    'recent_connections': [],
+    'last_update': 0
+}
 
 class UserManager:
     def __init__(self, db_path):
@@ -211,14 +221,28 @@ def get_system_stats():
         disk = psutil.disk_usage('/')
         disk_usage = disk.percent
         
+        # Get network stats
+        net_io = psutil.net_io_counters()
+        
+        # Get active connections count
+        try:
+            result = subprocess.run(['ss', '-tun'], capture_output=True, text=True)
+            active_connections = len(result.stdout.strip().split('\n')) - 1
+        except:
+            active_connections = 0
+        
         return {
-            'cpu_usage': cpu_usage,
-            'memory_usage': memory_usage,
-            'disk_usage': disk_usage,
+            'cpu_usage': round(cpu_usage, 1),
+            'memory_usage': round(memory_usage, 1),
+            'disk_usage': round(disk_usage, 1),
+            'active_connections': active_connections,
+            'network_sent': net_io.bytes_sent,
+            'network_recv': net_io.bytes_recv,
             'system_info': {
                 'hostname': os.uname().nodename,
                 'os': f"{os.uname().sysname} {os.uname().release}",
-                'architecture': os.uname().machine
+                'architecture': os.uname().machine,
+                'uptime': get_system_uptime()
             }
         }
     except Exception as e:
@@ -227,12 +251,50 @@ def get_system_stats():
             'cpu_usage': 0,
             'memory_usage': 0,
             'disk_usage': 0,
-            'system_info': {'hostname': 'Unknown', 'os': 'Unknown', 'architecture': 'Unknown'}
+            'active_connections': 0,
+            'network_sent': 0,
+            'network_recv': 0,
+            'system_info': {'hostname': 'Unknown', 'os': 'Unknown', 'architecture': 'Unknown', 'uptime': 'Unknown'}
         }
+
+def get_system_uptime():
+    try:
+        with open('/proc/uptime', 'r') as f:
+            uptime_seconds = float(f.readline().split()[0])
+        
+        days = int(uptime_seconds // 86400)
+        hours = int((uptime_seconds % 86400) // 3600)
+        minutes = int((uptime_seconds % 3600) // 60)
+        
+        if days > 0:
+            return f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            return f"{hours}h {minutes}m"
+        else:
+            return f"{minutes}m"
+    except:
+        return "Unknown"
+
+def update_global_data():
+    """Update global data in background"""
+    while True:
+        try:
+            global_data['system_stats'] = get_system_stats()
+            global_data['users'], _ = user_manager.load_users()
+            global_data['recent_connections'] = stats_manager.get_recent_connections(10)
+            global_data['last_update'] = time.time()
+        except Exception as e:
+            print(f"Error updating global data: {e}")
+        
+        time.sleep(5)  # Update every 5 seconds
 
 # Initialize managers
 user_manager = UserManager(USER_DB)
 stats_manager = StatisticsManager(STATS_DB)
+
+# Start background data updater
+data_updater_thread = threading.Thread(target=update_global_data, daemon=True)
+data_updater_thread.start()
 
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
@@ -260,7 +322,8 @@ HTML_TEMPLATE = '''
         }
         
         body {
-            background: #f8fafc;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
             color: var(--dark);
         }
         
@@ -271,88 +334,141 @@ HTML_TEMPLATE = '''
         }
         
         .header {
-            background: white;
+            background: rgba(255, 255, 255, 0.95);
             padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            margin-bottom: 25px;
             text-align: center;
+            backdrop-filter: blur(10px);
         }
         
         .header h1 {
-            color: var(--dark);
-            font-size: 2.5em;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-size: 3em;
             margin-bottom: 10px;
+            font-weight: 800;
+        }
+        
+        .header p {
+            color: #6b7280;
+            font-size: 1.2em;
         }
         
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 25px;
             margin-bottom: 30px;
         }
         
         .stat-card {
-            background: linear-gradient(135deg, var(--primary) 0%, var(--secondary) 100%);
-            color: white;
-            padding: 25px;
-            border-radius: 15px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 30px;
+            border-radius: 20px;
             text-align: center;
+            box-shadow: 0 5px 20px rgba(0,0,0,0.1);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+        }
+        
+        .stat-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 35px rgba(0,0,0,0.2);
         }
         
         .stat-card h3 {
             font-size: 0.9em;
-            opacity: 0.9;
-            margin-bottom: 10px;
+            color: #6b7280;
+            margin-bottom: 15px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
         
         .stat-card .value {
-            font-size: 2em;
-            font-weight: bold;
+            font-size: 2.5em;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
         }
         
         .content-section {
-            background: white;
-            padding: 25px;
-            border-radius: 15px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-            margin-bottom: 20px;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 30px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            margin-bottom: 25px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
         }
         
         .btn {
-            padding: 12px 24px;
+            padding: 15px 30px;
             border: none;
-            border-radius: 8px;
+            border-radius: 12px;
             cursor: pointer;
-            font-weight: 600;
+            font-weight: 700;
             transition: all 0.3s ease;
             margin: 5px;
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
         
-        .btn-primary { background: var(--primary); color: white; }
-        .btn-success { background: var(--success); color: white; }
-        .btn-danger { background: var(--danger); color: white; }
+        .btn-primary { 
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+        
+        .btn-success { 
+            background: linear-gradient(135deg, var(--success), #059669);
+            color: white;
+            box-shadow: 0 5px 15px rgba(16, 185, 129, 0.4);
+        }
+        
+        .btn-danger { 
+            background: linear-gradient(135deg, var(--danger), #dc2626);
+            color: white;
+            box-shadow: 0 5px 15px rgba(239, 68, 68, 0.4);
+        }
         
         .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
+            transform: translateY(-3px);
+            box-shadow: 0 10px 25px rgba(0,0,0,0.3);
         }
         
         table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 15px;
+            margin-top: 20px;
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.1);
         }
         
         th, td {
-            padding: 15px;
+            padding: 18px;
             text-align: left;
             border-bottom: 1px solid #e5e7eb;
         }
         
         th {
-            background: var(--light);
-            font-weight: 600;
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
+            color: white;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        
+        tr:hover {
+            background-color: #f8fafc;
         }
         
         .modal {
@@ -362,77 +478,153 @@ HTML_TEMPLATE = '''
             left: 0;
             width: 100%;
             height: 100%;
-            background: rgba(0,0,0,0.5);
+            background: rgba(0,0,0,0.7);
             z-index: 1000;
+            backdrop-filter: blur(5px);
         }
         
         .modal-content {
             background: white;
             margin: 10% auto;
-            padding: 30px;
-            border-radius: 15px;
+            padding: 40px;
+            border-radius: 20px;
             width: 90%;
             max-width: 500px;
+            box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+            animation: modalSlideIn 0.3s ease;
+        }
+        
+        @keyframes modalSlideIn {
+            from { transform: translateY(-50px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
         }
         
         .form-group {
-            margin-bottom: 20px;
+            margin-bottom: 25px;
         }
         
         .form-group label {
             display: block;
-            margin-bottom: 8px;
-            font-weight: 600;
+            margin-bottom: 10px;
+            font-weight: 700;
+            color: var(--dark);
         }
         
         .form-group input {
             width: 100%;
-            padding: 12px;
+            padding: 15px;
             border: 2px solid #e5e7eb;
-            border-radius: 8px;
-            font-size: 14px;
+            border-radius: 12px;
+            font-size: 16px;
+            transition: border-color 0.3s ease;
         }
         
         .form-group input:focus {
             border-color: var(--primary);
             outline: none;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
         
         .alert {
-            padding: 15px;
-            margin: 15px 0;
-            border-radius: 8px;
-            font-weight: 500;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 12px;
+            font-weight: 600;
+            animation: alertSlideIn 0.3s ease;
         }
         
-        .alert-success { background: #dcfce7; color: #166534; border: 1px solid #bbf7d0; }
-        .alert-error { background: #fecaca; color: #991b1b; border: 1px solid #fca5a5; }
+        @keyframes alertSlideIn {
+            from { transform: translateX(-100px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .alert-success { 
+            background: linear-gradient(135deg, #dcfce7, #bbf7d0);
+            color: #166534;
+            border: 1px solid #bbf7d0;
+        }
+        
+        .alert-error { 
+            background: linear-gradient(135deg, #fecaca, #fca5a5);
+            color: #991b1b;
+            border: 1px solid #fca5a5;
+        }
         
         .nav {
             display: flex;
-            gap: 10px;
-            margin-bottom: 20px;
+            gap: 15px;
+            margin-bottom: 25px;
             flex-wrap: wrap;
         }
         
         .nav-btn {
-            padding: 12px 20px;
-            background: white;
-            border: 2px solid #e5e7eb;
-            border-radius: 8px;
+            padding: 15px 25px;
+            background: rgba(255, 255, 255, 0.9);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 12px;
             cursor: pointer;
-            font-weight: 600;
+            font-weight: 700;
             transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            color: var(--dark);
         }
         
         .nav-btn.active {
-            background: var(--primary);
+            background: linear-gradient(135deg, var(--primary), var(--secondary));
             color: white;
-            border-color: var(--primary);
+            border-color: transparent;
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
         }
         
         .nav-btn:hover {
-            border-color: var(--primary);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.2);
+        }
+        
+        .last-update {
+            text-align: center;
+            color: #9ca3af;
+            font-size: 0.9em;
+            margin-top: 20px;
+        }
+        
+        .user-count {
+            font-size: 0.8em;
+            color: #6b7280;
+            margin-top: 10px;
+        }
+        
+        .connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+        
+        .status-online { background-color: var(--success); }
+        .status-offline { background-color: var(--danger); }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 10px;
+            }
+            
+            .header h1 {
+                font-size: 2em;
+            }
+            
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+            
+            .nav {
+                flex-direction: column;
+            }
+            
+            .nav-btn {
+                text-align: center;
+            }
         }
     </style>
 </head>
@@ -441,16 +633,22 @@ HTML_TEMPLATE = '''
         <div class="header">
             <h1>🚀 GX Tunnel</h1>
             <p>Advanced WebSocket SSH Tunnel Management</p>
+            <div class="last-update" id="lastUpdate">Last update: Just now</div>
         </div>
         
         <div class="nav">
             <button class="nav-btn active" onclick="showSection('dashboard')">📊 Dashboard</button>
             <button class="nav-btn" onclick="showSection('users')">👥 User Management</button>
             <button class="nav-btn" onclick="showSection('statistics')">📈 Statistics</button>
+            <button class="nav-btn" onclick="showSection('system')">⚙️ System Info</button>
         </div>
         
+        <!-- Alert Container -->
+        <div id="alertContainer"></div>
+        
+        <!-- Dashboard Section -->
         <div id="dashboard" class="content-section">
-            <h2>Dashboard</h2>
+            <h2>📊 Dashboard Overview</h2>
             <div class="stats-grid">
                 <div class="stat-card">
                     <h3>CPU Usage</h3>
@@ -470,44 +668,78 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
             
-            <button class="btn btn-primary" onclick="loadDashboardData()">Refresh Data</button>
+            <button class="btn btn-primary" onclick="loadAllData()">🔄 Refresh Data</button>
             
-            <h3 style="margin-top: 30px;">Recent Activity</h3>
-            <div id="recentActivity">Loading...</div>
+            <h3 style="margin-top: 40px; margin-bottom: 20px;">🕒 Recent Activity</h3>
+            <div id="recentActivity">
+                <table>
+                    <tr><th>Username</th><th>IP Address</th><th>Start Time</th><th>Duration</th><th>Download</th><th>Upload</th></tr>
+                    <tr><td colspan="6" style="text-align: center; padding: 40px;">Loading recent activity...</td></tr>
+                </table>
+            </div>
         </div>
         
+        <!-- User Management Section -->
         <div id="users" class="content-section" style="display: none;">
-            <h2>User Management</h2>
+            <h2>👥 User Management</h2>
             <button class="btn btn-success" onclick="showAddUserModal()">➕ Add New User</button>
-            <div id="usersList">Loading users...</div>
+            <div class="user-count" id="userCount">Loading users...</div>
+            <div id="usersList">
+                <table>
+                    <tr><th>Username</th><th>Password</th><th>Created</th><th>Max Connections</th><th>Actions</th></tr>
+                    <tr><td colspan="5" style="text-align: center; padding: 40px;">Loading users...</td></tr>
+                </table>
+            </div>
         </div>
         
+        <!-- Statistics Section -->
         <div id="statistics" class="content-section" style="display: none;">
-            <h2>System Statistics</h2>
-            <div id="systemStats">Loading statistics...</div>
+            <h2>📈 System Statistics</h2>
+            <div id="systemStats">
+                <div class="stats-grid">
+                    <div class="stat-card"><h3>CPU</h3><div class="value">0%</div></div>
+                    <div class="stat-card"><h3>Memory</h3><div class="value">0%</div></div>
+                    <div class="stat-card"><h3>Disk</h3><div class="value">0%</div></div>
+                    <div class="stat-card"><h3>Users</h3><div class="value">0</div></div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- System Info Section -->
+        <div id="system" class="content-section" style="display: none;">
+            <h2>⚙️ System Information</h2>
+            <div id="systemInfo">
+                <div style="background: #f8f9fa; padding: 25px; border-radius: 12px; margin-top: 20px;">
+                    <pre style="white-space: pre-wrap; font-family: 'Courier New', monospace;">Loading system information...</pre>
+                </div>
+            </div>
         </div>
     </div>
 
     <!-- Add User Modal -->
     <div id="addUserModal" class="modal">
         <div class="modal-content">
-            <h2>Add New User</h2>
+            <h2 style="margin-bottom: 25px;">➕ Add New User</h2>
             <form onsubmit="addUser(event)">
                 <div class="form-group">
-                    <label>Username</label>
-                    <input type="text" id="username" required placeholder="Enter username">
+                    <label>👤 Username</label>
+                    <input type="text" id="username" required placeholder="Enter username (letters, numbers, hyphens)" pattern="[a-zA-Z0-9_-]+" title="Only letters, numbers, hyphens and underscores allowed">
                 </div>
                 <div class="form-group">
-                    <label>Password</label>
-                    <input type="text" id="password" required placeholder="Enter password">
+                    <label>🔑 Password</label>
+                    <input type="text" id="password" required placeholder="Enter password" minlength="3">
                 </div>
                 <div class="form-group">
-                    <label>Max Connections</label>
-                    <input type="number" id="maxConnections" value="3" min="1" max="10">
+                    <label>🔗 Max Connections</label>
+                    <input type="number" id="maxConnections" value="3" min="1" max="10" placeholder="Maximum simultaneous connections">
                 </div>
-                <div style="display: flex; gap: 10px; margin-top: 20px;">
-                    <button type="submit" class="btn btn-success" style="flex: 1;">Create User</button>
-                    <button type="button" class="btn btn-danger" onclick="hideAddUserModal()">Cancel</button>
+                <div class="form-group">
+                    <label>📅 Expiration Date (Optional)</label>
+                    <input type="date" id="expiryDate" placeholder="YYYY-MM-DD">
+                </div>
+                <div style="display: flex; gap: 15px; margin-top: 30px;">
+                    <button type="submit" class="btn btn-success" style="flex: 1;">✅ Create User</button>
+                    <button type="button" class="btn btn-danger" onclick="hideAddUserModal()">❌ Cancel</button>
                 </div>
             </form>
         </div>
@@ -515,6 +747,7 @@ HTML_TEMPLATE = '''
 
     <script>
         let currentSection = 'dashboard';
+        let autoRefresh = true;
         
         // Show section function
         function showSection(section) {
@@ -522,6 +755,7 @@ HTML_TEMPLATE = '''
             document.getElementById('dashboard').style.display = 'none';
             document.getElementById('users').style.display = 'none';
             document.getElementById('statistics').style.display = 'none';
+            document.getElementById('system').style.display = 'none';
             
             // Remove active class from all buttons
             document.querySelectorAll('.nav-btn').forEach(btn => {
@@ -537,18 +771,13 @@ HTML_TEMPLATE = '''
             currentSection = section;
             
             // Load data for the section
-            if (section === 'dashboard') {
-                loadDashboardData();
-            } else if (section === 'users') {
-                loadUsers();
-            } else if (section === 'statistics') {
-                loadStatistics();
-            }
+            loadAllData();
         }
         
         // Modal functions
         function showAddUserModal() {
             document.getElementById('addUserModal').style.display = 'block';
+            document.getElementById('username').focus();
         }
         
         function hideAddUserModal() {
@@ -556,89 +785,161 @@ HTML_TEMPLATE = '''
             document.getElementById('username').value = '';
             document.getElementById('password').value = '';
             document.getElementById('maxConnections').value = '3';
+            document.getElementById('expiryDate').value = '';
         }
         
-        // Dashboard functions
-        async function loadDashboardData() {
+        // Data loading functions
+        async function loadAllData() {
             try {
-                const response = await fetch('/api/stats');
-                if (!response.ok) throw new Error('API response error');
+                // Get all data from the server
+                const response = await fetch('/get_all_data');
+                if (!response.ok) throw new Error('Failed to fetch data');
                 const data = await response.json();
                 
-                // Update stats
-                document.getElementById('cpuUsage').textContent = data.system.cpu_usage + '%';
-                document.getElementById('memoryUsage').textContent = data.system.memory_usage + '%';
-                document.getElementById('totalUsers').textContent = data.users.length;
-                document.getElementById('activeConnections').textContent = data.recent_connections.length;
-                
-                // Update recent activity
-                let activityHtml = '<table><tr><th>Username</th><th>IP</th><th>Time</th><th>Duration</th></tr>';
-                if (data.recent_connections && data.recent_connections.length > 0) {
-                    data.recent_connections.forEach(conn => {
-                        activityHtml += `<tr>
-                            <td>${conn.username}</td>
-                            <td>${conn.client_ip}</td>
-                            <td>${conn.start_time}</td>
-                            <td>${conn.duration}s</td>
-                        </tr>`;
-                    });
-                } else {
-                    activityHtml += '<tr><td colspan="4" style="text-align: center;">No recent activity</td></tr>';
-                }
-                activityHtml += '</table>';
-                document.getElementById('recentActivity').innerHTML = activityHtml;
+                updateDashboard(data);
+                updateUsers(data);
+                updateStatistics(data);
+                updateSystemInfo(data);
+                updateLastUpdate();
                 
             } catch (error) {
-                console.error('Error loading dashboard:', error);
-                showAlert('Error loading dashboard data', 'error');
+                console.error('Error loading data:', error);
+                showAlert('Error loading data: ' + error.message, 'error');
             }
+        }
+        
+        function updateDashboard(data) {
+            if (currentSection !== 'dashboard') return;
+            
+            // Update stats cards
+            document.getElementById('cpuUsage').textContent = data.system_stats.cpu_usage + '%';
+            document.getElementById('memoryUsage').textContent = data.system_stats.memory_usage + '%';
+            document.getElementById('totalUsers').textContent = data.users.length;
+            document.getElementById('activeConnections').textContent = data.system_stats.active_connections;
+            
+            // Update recent activity
+            let activityHtml = '<table><tr><th>Username</th><th>IP</th><th>Start Time</th><th>Duration</th><th>Download</th><th>Upload</th></tr>';
+            
+            if (data.recent_connections && data.recent_connections.length > 0) {
+                data.recent_connections.forEach(conn => {
+                    const downloadMB = (conn.download_bytes / (1024 * 1024)).toFixed(2);
+                    const uploadMB = (conn.upload_bytes / (1024 * 1024)).toFixed(2);
+                    
+                    activityHtml += `<tr>
+                        <td>${conn.username || 'N/A'}</td>
+                        <td>${conn.client_ip || 'N/A'}</td>
+                        <td>${conn.start_time || 'N/A'}</td>
+                        <td>${conn.duration || 0}s</td>
+                        <td>${downloadMB} MB</td>
+                        <td>${uploadMB} MB</td>
+                    </tr>`;
+                });
+            } else {
+                activityHtml += '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #6b7280;">No recent activity</td></tr>';
+            }
+            activityHtml += '</table>';
+            document.getElementById('recentActivity').innerHTML = activityHtml;
+        }
+        
+        function updateUsers(data) {
+            if (currentSection !== 'users') return;
+            
+            // Update user count
+            document.getElementById('userCount').textContent = `Total users: ${data.users.length}`;
+            
+            // Update users list
+            let html = '<table><tr><th>Username</th><th>Password</th><th>Created</th><th>Max Connections</th><th>Status</th><th>Actions</th></tr>';
+            
+            if (data.users && data.users.length > 0) {
+                data.users.forEach(user => {
+                    const isExpired = user.expires && new Date(user.expires) < new Date();
+                    const status = isExpired ? '❌ Expired' : '✅ Active';
+                    const statusClass = isExpired ? 'status-offline' : 'status-online';
+                    
+                    html += `<tr>
+                        <td>${user.username}</td>
+                        <td>${user.password}</td>
+                        <td>${user.created}</td>
+                        <td>${user.max_connections || 3}</td>
+                        <td><span class="connection-status ${statusClass}"></span>${status}</td>
+                        <td>
+                            <button class="btn btn-danger" onclick="deleteUser('${user.username}')">🗑️ Delete</button>
+                        </td>
+                    </tr>`;
+                });
+            } else {
+                html += '<tr><td colspan="6" style="text-align: center; padding: 40px; color: #6b7280;">No users found</td></tr>';
+            }
+            
+            html += '</table>';
+            document.getElementById('usersList').innerHTML = html;
+        }
+        
+        function updateStatistics(data) {
+            if (currentSection !== 'statistics') return;
+            
+            let html = '<div class="stats-grid">';
+            html += `<div class="stat-card"><h3>CPU Usage</h3><div class="value">${data.system_stats.cpu_usage}%</div></div>`;
+            html += `<div class="stat-card"><h3>Memory Usage</h3><div class="value">${data.system_stats.memory_usage}%</div></div>`;
+            html += `<div class="stat-card"><h3>Disk Usage</h3><div class="value">${data.system_stats.disk_usage}%</div></div>`;
+            html += `<div class="stat-card"><h3>Total Users</h3><div class="value">${data.users.length}</div></div>`;
+            html += `<div class="stat-card"><h3>Active Connections</h3><div class="value">${data.system_stats.active_connections}</div></div>`;
+            html += `<div class="stat-card"><h3>Network Sent</h3><div class="value">${(data.system_stats.network_sent / (1024 * 1024)).toFixed(1)}MB</div></div>`;
+            html += '</div>';
+            
+            document.getElementById('systemStats').innerHTML = html;
+        }
+        
+        function updateSystemInfo(data) {
+            if (currentSection !== 'system') return;
+            
+            const systemInfo = data.system_stats.system_info;
+            let infoHtml = '<div style="background: #f8f9fa; padding: 25px; border-radius: 12px;">';
+            infoHtml += '<pre style="white-space: pre-wrap; font-family: \'Courier New\', monospace; line-height: 1.6;">';
+            infoHtml += `Hostname:       ${systemInfo.hostname}\n`;
+            infoHtml += `Operating System: ${systemInfo.os}\n`;
+            infoHtml += `Architecture:   ${systemInfo.architecture}\n`;
+            infoHtml += `Uptime:         ${systemInfo.uptime}\n`;
+            infoHtml += `CPU Usage:      ${data.system_stats.cpu_usage}%\n`;
+            infoHtml += `Memory Usage:   ${data.system_stats.memory_usage}%\n`;
+            infoHtml += `Disk Usage:     ${data.system_stats.disk_usage}%\n`;
+            infoHtml += `Active Connections: ${data.system_stats.active_connections}\n`;
+            infoHtml += `Total Users:    ${data.users.length}\n`;
+            infoHtml += '</pre></div>';
+            
+            document.getElementById('systemInfo').innerHTML = infoHtml;
+        }
+        
+        function updateLastUpdate() {
+            const now = new Date();
+            document.getElementById('lastUpdate').textContent = 
+                `Last update: ${now.toLocaleTimeString()}`;
         }
         
         // User management functions
-        async function loadUsers() {
-            try {
-                const response = await fetch('/api/users');
-                if (!response.ok) throw new Error('API response error');
-                const data = await response.json();
-                
-                let html = '<table><tr><th>Username</th><th>Password</th><th>Created</th><th>Max Conn</th><th>Actions</th></tr>';
-                
-                if (data.users && data.users.length > 0) {
-                    data.users.forEach(user => {
-                        html += `<tr>
-                            <td>${user.username}</td>
-                            <td>${user.password}</td>
-                            <td>${user.created}</td>
-                            <td>${user.max_connections || 3}</td>
-                            <td>
-                                <button class="btn btn-danger" onclick="deleteUser('${user.username}')">Delete</button>
-                            </td>
-                        </tr>`;
-                    });
-                } else {
-                    html += '<tr><td colspan="5" style="text-align: center;">No users found</td></tr>';
-                }
-                
-                html += '</table>';
-                document.getElementById('usersList').innerHTML = html;
-                
-            } catch (error) {
-                console.error('Error loading users:', error);
-                document.getElementById('usersList').innerHTML = '<div class="alert alert-error">Error loading users</div>';
-            }
-        }
-        
         async function addUser(event) {
             event.preventDefault();
             
             const userData = {
                 username: document.getElementById('username').value,
                 password: document.getElementById('password').value,
-                max_connections: parseInt(document.getElementById('maxConnections').value) || 3
+                max_connections: parseInt(document.getElementById('maxConnections').value) || 3,
+                expires: document.getElementById('expiryDate').value || null
             };
             
+            // Basic validation
+            if (!userData.username || !userData.password) {
+                showAlert('Username and password are required', 'error');
+                return;
+            }
+            
+            if (!/^[a-zA-Z0-9_-]+$/.test(userData.username)) {
+                showAlert('Username can only contain letters, numbers, hyphens, and underscores', 'error');
+                return;
+            }
+            
             try {
-                const response = await fetch('/api/users/add', {
+                const response = await fetch('/add_user', {
                     method: 'POST',
                     headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify(userData)
@@ -649,10 +950,7 @@ HTML_TEMPLATE = '''
                 
                 if (result.success) {
                     hideAddUserModal();
-                    if (currentSection === 'users') {
-                        loadUsers();
-                    }
-                    loadDashboardData();
+                    loadAllData(); // Reload all data
                 }
             } catch (error) {
                 showAlert('Error adding user: ' + error.message, 'error');
@@ -660,9 +958,9 @@ HTML_TEMPLATE = '''
         }
         
         async function deleteUser(username) {
-            if (confirm(`Delete user ${username}?`)) {
+            if (confirm(`Are you sure you want to delete user "${username}"?`)) {
                 try {
-                    const response = await fetch('/api/users/delete', {
+                    const response = await fetch('/delete_user', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({username: username})
@@ -671,48 +969,23 @@ HTML_TEMPLATE = '''
                     const result = await response.json();
                     showAlert(result.message, result.success ? 'success' : 'error');
                     
-                    if (result.success && currentSection === 'users') {
-                        loadUsers();
+                    if (result.success) {
+                        loadAllData(); // Reload all data
                     }
-                    loadDashboardData();
                 } catch (error) {
                     showAlert('Error deleting user: ' + error.message, 'error');
                 }
             }
         }
         
-        // Statistics functions
-        async function loadStatistics() {
-            try {
-                const response = await fetch('/api/stats');
-                if (!response.ok) throw new Error('API response error');
-                const data = await response.json();
-                
-                let html = '<div class="stats-grid">';
-                html += `<div class="stat-card"><h3>CPU</h3><div class="value">${data.system.cpu_usage}%</div></div>`;
-                html += `<div class="stat-card"><h3>Memory</h3><div class="value">${data.system.memory_usage}%</div></div>`;
-                html += `<div class="stat-card"><h3>Disk</h3><div class="value">${data.system.disk_usage}%</div></div>`;
-                html += `<div class="stat-card"><h3>Users</h3><div class="value">${data.users.length}</div></div>`;
-                html += '</div>';
-                
-                html += '<h3>System Information</h3>';
-                html += `<pre style="background: #f8f9fa; padding: 15px; border-radius: 8px;">${JSON.stringify(data.system.system_info, null, 2)}</pre>`;
-                
-                document.getElementById('systemStats').innerHTML = html;
-                
-            } catch (error) {
-                console.error('Error loading statistics:', error);
-                document.getElementById('systemStats').innerHTML = '<div class="alert alert-error">Error loading statistics</div>';
-            }
-        }
-        
         // Utility functions
         function showAlert(message, type) {
+            const alertContainer = document.getElementById('alertContainer');
             const alert = document.createElement('div');
             alert.className = `alert alert-${type}`;
             alert.textContent = message;
             
-            document.querySelector('.container').prepend(alert);
+            alertContainer.appendChild(alert);
             
             setTimeout(() => {
                 alert.remove();
@@ -721,56 +994,71 @@ HTML_TEMPLATE = '''
         
         // Close modal when clicking outside
         window.onclick = function(event) {
-            if (event.target === document.getElementById('addUserModal')) {
+            const modal = document.getElementById('addUserModal');
+            if (event.target === modal) {
                 hideAddUserModal();
             }
         }
         
-        // Auto-refresh dashboard every 30 seconds
+        // Auto-refresh data every 10 seconds
         setInterval(() => {
-            if (currentSection === 'dashboard') {
-                loadDashboardData();
+            if (autoRefresh) {
+                loadAllData();
             }
-        }, 30000);
+        }, 10000);
         
-        // Load initial data
-        loadDashboardData();
+        // Initial load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadAllData();
+        });
     </script>
 </body>
 </html>
 '''
 
-# API Routes
 @app.route('/')
 def index():
-    return HTML_TEMPLATE
+    return render_template_string(HTML_TEMPLATE)
 
-@app.route('/api/users')
-def get_users():
+@app.route('/get_all_data')
+def get_all_data():
+    """Get all data in one endpoint to avoid multiple API calls"""
     try:
-        users, settings = user_manager.load_users()
-        return jsonify({'users': users, 'settings': settings})
+        return jsonify({
+            'system_stats': global_data['system_stats'],
+            'users': global_data['users'],
+            'recent_connections': global_data['recent_connections'],
+            'last_update': global_data['last_update']
+        })
     except Exception as e:
-        return jsonify({'users': [], 'settings': {}})
+        return jsonify({
+            'system_stats': get_system_stats(),
+            'users': [],
+            'recent_connections': [],
+            'last_update': time.time(),
+            'error': str(e)
+        })
 
-@app.route('/api/users/add', methods=['POST'])
-def add_user_api():
+@app.route('/add_user', methods=['POST'])
+def add_user():
     try:
         data = request.get_json()
         username = data.get('username')
         password = data.get('password')
         max_connections = data.get('max_connections', 3)
+        expires = data.get('expires')
         
         if not username or not password:
             return jsonify({'success': False, 'message': 'Username and password are required'})
         
-        success, message = user_manager.add_user(username, password, None, max_connections)
+        success, message = user_manager.add_user(username, password, expires, max_connections)
         return jsonify({'success': success, 'message': message})
+        
     except Exception as e:
         return jsonify({'success': False, 'message': f'Error: {str(e)}'})
 
-@app.route('/api/users/delete', methods=['POST'])
-def delete_user_api():
+@app.route('/delete_user', methods=['POST'])
+def delete_user():
     try:
         data = request.get_json()
         username = data.get('username')
@@ -780,36 +1068,25 @@ def delete_user_api():
         
         success, message = user_manager.delete_user(username)
         return jsonify({'success': success, 'message': message})
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Error: {str(e)}'})
-
-@app.route('/api/stats')
-def get_stats():
-    try:
-        system_stats = get_system_stats()
-        users, settings = user_manager.load_users()
-        recent_connections = stats_manager.get_recent_connections(5)
         
-        return jsonify({
-            'system': system_stats,
-            'users': users,
-            'recent_connections': recent_connections
-        })
-    except Exception as e:
-        return jsonify({
-            'system': get_system_stats(),
-            'users': [],
-            'recent_connections': []
-        })
-
-@app.route('/api/services/restart', methods=['POST'])
-def restart_services():
-    try:
-        return jsonify({'success': True, 'message': 'Services restarted successfully'})
     except Exception as e:
         return jsonify({'success': False, 'message': f'Error: {str(e)}'})
+
+@app.route('/get_stats')
+def get_stats():
+    """Get system statistics"""
+    try:
+        return jsonify(get_system_stats())
+    except Exception as e:
+        return jsonify({'error': str(e)})
 
 if __name__ == '__main__':
-    print("🚀 Starting GX Tunnel Web GUI on port 8081...")
-    print("📧 Admin Access: http://46.224.17.19:8081")
-    app.run(host='0.0.0.0', port=8081, debug=False)
+    print("🚀 Starting GX Tunnel Web GUI...")
+    print("📊 Dashboard available at: http://localhost:5000")
+    print("🔧 Press Ctrl+C to stop the server")
+    
+    # Ensure directories exist
+    os.makedirs(os.path.dirname(USER_DB), exist_ok=True)
+    os.makedirs(os.path.dirname(STATS_DB), exist_ok=True)
+    
+    app.run(host='0.0.0.0', port=5000, debug=False)
