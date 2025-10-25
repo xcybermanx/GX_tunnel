@@ -23,6 +23,33 @@ WEBGUI_SERVICE="gx-webgui"
 BACKUP_DIR="$INSTALL_DIR/backups"
 CONFIG_FILE="$INSTALL_DIR/config.json"
 
+# Check and free port if in use
+check_and_free_port() {
+    local port=$1
+    local service=$2
+    
+    if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null; then
+        log_warning "Port $port is in use, attempting to free it..."
+        
+        # Try to stop the service if it's our service
+        systemctl stop "$service" 2>/dev/null || true
+        
+        # Kill any process using the port
+        fuser -k $port/tcp 2>/dev/null || true
+        sleep 2
+        
+        # Double check
+        if lsof -Pi :$port -sTCP:LISTEN -t >/dev/null; then
+            log_error "Port $port is still in use after cleanup"
+            log_info "Please manually free port $port and run the installation again"
+            return 1
+        else
+            log_success "Port $port freed successfully"
+        fi
+    fi
+    return 0
+}
+
 # ... [Previous banner and utility functions remain the same] ...
 
 # Install system dependencies without interactive prompts
